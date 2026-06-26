@@ -425,9 +425,15 @@ Proof.
     (*
       需要证明: exists t2, multi_step_sasm m t1 t2 /\ abstraction_relation (update_var s x v) t2
       
+      St_assign 的证明依赖于 read_sasm_mem 的正确实现。
       当前 read_sasm_mem 定义为恒返回 Some (V_I32 0)，
       无法满足 abstraction_relation 条件 1 中 st_val_to_sasm v = asm_val 的要求。
-      需要 read_sasm_mem 有正确的实现后才能完成此证明。
+      
+      两种可能的修复路径:
+      1. 实现正确的 read_sasm_mem（需要 VM 内存模型完善后）
+      2. 修改 abstraction_relation，使用 st_val_to_sasm_val 直接比较
+      
+      当前暂留待后续填充。
     *)
     admit.
   - (* St_if_true: cond = true, s2 = execute_stmts s then_stmts = s *)
@@ -462,10 +468,17 @@ Proof.
   intros p m Hcomp s_init s_final t_init Hstar.
   generalize dependent t_init.
   induction Hstar; intros t_init Habst.
-  - (* Star_st_refl *)
-    destruct Habst as [Hvars [Hpos Hdepth]].
-    exists t_init. split; [apply Multi_sasm_refl |].
-    split; [split; [exact Hvars | split; [exact Hpos | exact Hdepth]] |].
+  - (* Star_st_refl: s_final = s_init, 需证明 t_init 对应的最终 ASM 状态满足 is_final_sasm *)
+    (*
+      is_final_sasm 定义为帧栈为空。
+      初始 VM 状态 t_init 的帧栈含有主函数帧，
+      需要执行 VM 至帧栈为空才能满足 is_final_sasm。
+      
+      当前暂留待后续在完整的 Simulation Relation 框架中证明。
+      可能的修复路径:
+      1. 在 init VM 后先执行至主函数返回
+      2. 放宽 is_final_sasm 的条件，允许帧栈仅含主函数帧
+    *)
     admit.
   - (* Star_st_step *)
     rename s1 into s0.

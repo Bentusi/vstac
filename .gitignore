@@ -38,7 +38,6 @@ tests/vm-tests/test_minimal
 
 # Coq 编译缓存
 .coq-native/
-_CoqProject
 
 # ================================================================
 # OCaml 编译产物 (Coq Extraction 目标)

@@ -19,6 +19,14 @@ VM_IO_SRCS   = vm/io/io_mapping.c
 VM_IO_OBJS   = $(VM_IO_SRCS:.c=.o)
 VM_IO_LIB    = vm/io/libvm_io.a
 
+# VM 热备模块
+VM_HS_SRCS   = vm/hotstandby/snapshot.c \
+               vm/hotstandby/sync.c \
+               vm/hotstandby/state_machine.c \
+               vm/hotstandby/download.c
+VM_HS_OBJS   = $(VM_HS_SRCS:.c=.o)
+VM_HS_LIB    = vm/hotstandby/libvm_hs.a
+
 # VM 测试
 VM_TEST_DIR  = tests/vm-tests
 VM_TEST_SRCS = $(VM_TEST_DIR)/test_minimal.c
@@ -34,9 +42,9 @@ RTTHREAD_SRCS = $(RTTHREAD_DIR)/vm_rtthread.c
 RTTHREAD_OBJS = $(RTTHREAD_SRCS:.c=.o)
 RTTHREAD_BIN  = $(RTTHREAD_DIR)/vm_rtthread.elf
 
-.PHONY: all coq vm-lib vm-io vm-test sasm-dump rtthread clean
+.PHONY: all coq vm-lib vm-io vm-hs vm-test sasm-dump rtthread clean
 
-all: coq vm-lib vm-test sasm-dump
+all: coq vm-lib vm-hs vm-test sasm-dump
 
 # ================================================================
 # VM 核心库编译
@@ -60,6 +68,18 @@ $(VM_IO_LIB): $(VM_IO_OBJS)
 	$(AR) $(ARFLAGS) $@ $^
 
 vm/io/%.o: vm/io/%.c vm/io/io_mapping.h vm/vm.h rtos/abstract.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# ================================================================
+# VM 热备模块编译
+# ================================================================
+
+vm-hs: vm-lib $(VM_HS_LIB)
+
+$(VM_HS_LIB): $(VM_HS_OBJS)
+	$(AR) $(ARFLAGS) $@ $^
+
+vm/hotstandby/%.o: vm/hotstandby/%.c vm/hotstandby/hotstandby.h vm/vm.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ================================================================
@@ -160,6 +180,7 @@ clean:
 	rm -f $(SASM_DUMP_BIN)
 	rm -f $(VM_CORE_LIB) $(VM_CORE_OBJS)
 	rm -f $(VM_IO_LIB) $(VM_IO_OBJS)
+	rm -f $(VM_HS_LIB) $(VM_HS_OBJS)
 	rm -f $(RTTHREAD_OBJS) $(RTTHREAD_BIN)
 	find . -name '*.o' -delete
 

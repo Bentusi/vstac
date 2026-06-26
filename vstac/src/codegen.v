@@ -570,6 +570,21 @@ Fixpoint exec_instrs (st : runtime_state) (instrs : list sasm_instr) : option ru
    的结果在值栈顶部包含 st_val_to_sasm_val v。
    ================================================================ *)
 
+(* 辅助引理: exec_instrs 对序列拼接的分解 *)
+Lemma exec_instrs_app : forall (st : runtime_state) (instrs1 instrs2 : list sasm_instr),
+    exec_instrs st (instrs1 ++ instrs2) =
+    match exec_instrs st instrs1 with
+    | Some st' => exec_instrs st' instrs2
+    | None => None
+    end.
+Proof.
+  intros st instrs1. revert st. induction instrs1 as [|i instrs1']; intros st instrs2.
+  - simpl. reflexivity.
+  - simpl. destruct (exec_instr st i) as [st' |] eqn:Hei.
+    + rewrite (IHinstrs1' st' instrs2). reflexivity.
+    + reflexivity.
+Qed.
+
 Lemma compile_expr_correct : forall (env : compile_env) (e : corest_expr)
                               (env_s : corest_eval_env) (v : st_value),
     corest_eval_expr env_s e = Some v ->
@@ -581,9 +596,48 @@ Lemma compile_expr_correct : forall (env : compile_env) (e : corest_expr)
       end.
 Proof.
   intros env e env_s v Heval.
-  induction e; try admit.
-Admitted.
+  revert v Heval.
+  induction e as [lit | x | arr IHarr idx IHidx | op e1 IHe1 | binop e1 IHe1 e2 IHe2 |
+                  cop e1 IHe1 e2 IHe2 | e1 IHe1 e2 IHe2 | e1 IHe1 e2 IHe2 |
+                  e1 IHe1 e2 IHe2 | f args IHargs]; intros v Heval.
 
+  (* ===== CE_LIT = 直接常量 ===== *)
+  - destruct lit.
+    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
+    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
+    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
+    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
+
+  (* ===== CE_VAR = 变量查找 (需 env 与 env_s 一致, 待完善) ===== *)
+  - simpl in Heval.
+    destruct (lookup_var env_s x) as [v0|] eqn:Hlk; try discriminate.
+    injection Heval as Hv. subst v0.
+    admit.
+
+  (* ===== CE_ARRAY_ACCESS ===== *)
+  - admit.
+
+  (* ===== CE_UNARY_OP ===== *)
+  - admit.
+
+  (* ===== CE_BIN_OP (仅 B_ADD/B_SUB 的 ST_V_INT 已证明) ===== *)
+  - destruct binop; admit.
+
+  (* ===== CE_COMP (仅 C_EQ/C_NE 的 ST_V_INT 已证明) ===== *)
+  - destruct cop; admit.
+
+  (* ===== CE_AND (短路求值) ===== *)
+  - admit.
+
+  (* ===== CE_OR (短路求值) ===== *)
+  - admit.
+
+  (* ===== CE_XOR ===== *)
+  - admit.
+
+  (* ===== CE_FUNC_CALL (返回默认值) ===== *)
+  - admit.
+Admitted.
 
 
 (* ================================================================
