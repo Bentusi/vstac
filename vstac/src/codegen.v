@@ -588,77 +588,35 @@ Lemma exec_instr_preserves_frame_count : forall (st : runtime_state) (i : sasm_i
     exec_instr st i = Some st' ->
     Z.of_nat (List.length st'.(rt_frames)) = Z.of_nat (List.length st.(rt_frames)).
 Proof.
-  (* 辅助：从 Some a = Some b 提取 a = b，再用 f_equal 推到帧计数相等 *)
-  Ltac solve_frame_count :=
-    match goal with
-    | H : Some ?a = Some ?b |- _ =>
-        assert (Heq : a = b) by (exact (match H with eq_refl => eq_refl end));
-        apply (f_equal (fun s => Z.of_nat (List.length s.(rt_frames)))) in Heq;
-        exact (eq_sym Heq)
-    end.
   intros st i st' Hexec.
+  unfold exec_instr in Hexec.
+  (* 展开辅助函数：push_value, pop1, pop2, state_with_top, state_with_top2 *)
+  unfold push_value, pop1, pop2, state_with_top, state_with_top2 in Hexec.
+  (* destruct 指令，为每类指令独立出子目标 *)
   destruct i; simpl in Hexec; try discriminate.
-  all: try solve [solve_frame_count].
-  (* DROP / LOCAL_SET / I32_STORE* / F32_STORE* / F64_STORE* *)
-  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate; solve_frame_count].
-  (* LOCAL_GET *)
-  all: try solve [destruct st.(rt_frames) as [|f fs] eqn:?;
-                  [solve_frame_count |
-                   destruct (List.nth_error f.(frame_locals) (Z.to_nat z)) eqn:?;
-                   solve_frame_count]].
-  (* I32_ADD/SUB/MUL/DIV_S/REM_S/EQZ/EQ/NE/LT_S/LE_S/GT_S/GE_S/AND/OR/XOR *)
-  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
-                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
-                  destruct vs1 as [|v2 vs2]; try discriminate;
-                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
-                  solve_frame_count].
-  (* I32_DIV_S / I32_REM_S *)
-  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
-                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
-                  destruct vs1 as [|v2 vs2]; try discriminate;
-                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
-                  destruct (Z.eqb n2 0) eqn:?; try discriminate;
-                  solve_frame_count].
-  (* SELECT *)
-  all: try solve [destruct st.(rt_values) as [|c cs]; try discriminate;
-                  destruct c as [| | | | | n_c | | |]; try discriminate;
-                  destruct cs as [|v1 vs']; try discriminate;
-                  destruct v1 as [| | | | | n_v1 | | |]; try discriminate;
-                  destruct vs' as [|v0 _]; try discriminate;
-                  destruct v0 as [| | | | | n_v0 | | |]; try discriminate;
-                  solve_frame_count].
-  (* I32_LOAD / I64_LOAD / F32_LOAD / F64_LOAD *)
-  all: try solve [destruct st.(rt_values) as [|addr vs]; try discriminate;
-                  destruct addr as [| | | | | n | | |]; try discriminate;
-                  destruct (read_memory st n m.(mem_offset)) eqn:?; try discriminate;
-                  solve_frame_count].
-  (* I32_EQZ *)
-  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate;
-                  destruct v as [| | | | | n | | |]; try discriminate;
-                  solve_frame_count].
-  (* LOCAL_TEE *)
-  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate;
-                  destruct st.(rt_frames) as [|f fs] eqn:?;
-                  solve_frame_count].
-  (* I64 / I32_SHL 等 *)
-  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
-                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
-                  destruct vs1 as [|v2 vs2]; try discriminate;
-                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
-                  solve_frame_count].
-  (* I64_DIV_S / I64_REM_S *)
-  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
-                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
-                  destruct vs1 as [|v2 vs2]; try discriminate;
-                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
-                  destruct (Z.eqb n2 0) eqn:?; try discriminate;
-                  solve_frame_count].
-  (* I64_EQZ *)
-  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate;
-                  destruct v as [| | | | | n | | |]; try discriminate;
-                  solve_frame_count].
-  (* F32/F64 / 类型转换 — 由 | _ => None 捕获 *)
-  all: try solve [solve_frame_count].
+  (* destruct 运行时状态以暴露所有字段 *)
+  all: destruct st as [vals frames mem cnt]; simpl in Hexec.
+  (* 通用处理所有指令子目标 *)
+  all: repeat match goal with
+       (* 矛盾：None = Some st' *)
+       | H : None = Some _ |- _ => discriminate H
+       (* 成功执行且返回值不影响帧栈 *)
+       | H : Some _ = Some _ |- _ =>
+           injection H; intros; subst; reflexivity
+       (* destruct 值栈上的 match (e.g., I32_ADD 检查栈顶) *)
+       | H : context[match ?L with | nil => _ | _ :: _ => _ end] |- _ =>
+           destruct L eqn:?
+       (* destruct 帧栈上的 match (e.g., LOCAL_GET/LOCAL_SET) *)
+       | H : context[match ?F with | nil => _ | _ :: _ => _ end] |- _ =>
+           destruct F eqn:?
+       (* destruct sasm_value 构造子 (V_I32, V_I64, V_F32, V_F64) *)
+       | H : context[match ?V with | V_I32 _ => _ | V_I64 _ => _ | V_F32 _ => _ | V_F64 _ => _ end] |- _ =>
+           destruct V
+       (* destruct 布尔条件 (e.g., Z.eqb n2 0) *)
+       | H : context[if ?B then _ else _] |- _ => destruct B
+       (* destruct nth_error 结果 *)
+       | H : nth_error _ _ = Some _ |- _ => destruct H; simpl in H
+       end.
   all: admit.
 Admitted.
 
@@ -752,7 +710,7 @@ Proof.
     | H : corest_eval_expr ?env_s (CE_LIT ?lit) = Some ?v |- _ =>
         destruct lit;
           simpl in H; injection H as ?; subst v; simpl;
-          eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; rewrite Hstack; reflexivity |
+          eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; unfold exec_instr; simpl; rewrite Hstack; reflexivity |
             unfold push_value; simpl; reflexivity]]
     | H : corest_eval_expr ?env_s (CE_FUNC_CALL ?f ?args) = Some ?v |- _ =>
         simpl in H; injection H as ?; subst v; simpl;
@@ -762,7 +720,7 @@ Proof.
         destruct (lookup_var env_s x) as [v0|]; try discriminate;
         injection H as ?; subst v0;
         destruct (lookup_var_idx env x);
-        eexists; split; [reflexivity | split; [simpl; reflexivity | simpl; reflexivity]]
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; reflexivity | simpl; reflexivity]]
     | H : corest_eval_expr ?env_s (CE_BIN_OP B_ADD ?e1 ?e2) = Some ?v |- _ =>
         simpl in H;
         remember (corest_eval_expr env_s e1) as x1;
@@ -784,8 +742,8 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_ADD]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
     | H : corest_eval_expr ?env_s (CE_BIN_OP B_SUB ?e1 ?e2) = Some ?v |- _ =>
         simpl in H;
         remember (corest_eval_expr env_s e1) as x1;
@@ -807,8 +765,8 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_SUB]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
     | H : corest_eval_expr ?env_s (CE_COMP C_EQ ?e1 ?e2) = Some ?v |- _ =>
         simpl in H;
         remember (corest_eval_expr env_s e1) as x1;
@@ -830,7 +788,7 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_EQ]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
         eexists; split; [reflexivity |
           split; [simpl; destruct (Z.eqb n1 n2); reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
     | H : corest_eval_expr ?env_s (CE_COMP C_NE ?e1 ?e2) = Some ?v |- _ =>
@@ -854,7 +812,7 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_NE]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
         eexists; split; [reflexivity |
           split; [simpl; destruct (Z.eqb n1 n2); reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
     | H : corest_eval_expr ?env_s (CE_XOR ?e1 ?e2) = Some ?v |- _ =>
@@ -877,8 +835,8 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_XOR]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; destruct b, b0; reflexivity |
           unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
 
     (* === CE_BIN_OP B_MUL — provable === *)
@@ -903,8 +861,8 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_MUL]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [reflexivity | exact Hframes2]]
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [reflexivity | exact Hframes2]]
 
     (* === CE_BIN_OP B_DIV — provable (SAFE_ASSERT is no-op; div‑by‑zero at exec level) === *)
     | H : corest_eval_expr ?env_s (CE_BIN_OP B_DIV ?e1 ?e2) = Some ?v |- _ =>
@@ -929,8 +887,8 @@ Proof.
                   (compile_expr env e1) (compile_expr env e2)
                   [SAFE_ASSERT (ASSERT_CYCLE_LIMIT 0); I32_DIV_S]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [simpl; reflexivity | exact Hframes2]]
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; reflexivity | exact Hframes2]]
 
     (* === CE_BIN_OP B_MOD — provable === *)
     | H : corest_eval_expr ?env_s (CE_BIN_OP B_MOD ?e1 ?e2) = Some ?v |- _ =>
@@ -954,11 +912,12 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_REM_S]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [simpl; reflexivity | exact Hframes2]]
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; reflexivity | exact Hframes2]]
 
     (* === CE_COMP C_LT — provable === *)
     | H : corest_eval_expr ?env_s (CE_COMP C_LT ?e1 ?e2) = Some ?v |- _ =>
+        idtac "C_LT handler running!";
         simpl in H;
         remember (corest_eval_expr env_s e1) as x1;
         remember (corest_eval_expr env_s e2) as x2;
@@ -979,7 +938,7 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_LT_S]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
         eexists; split; [reflexivity |
           split; [simpl; destruct (n1 <? n2); reflexivity | exact Hframes2]]
 
@@ -1005,7 +964,7 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_LE_S]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
         eexists; split; [reflexivity |
           split; [simpl; destruct (n1 <=? n2); reflexivity | exact Hframes2]]
 
@@ -1031,7 +990,7 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_GT_S]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
         eexists; split; [reflexivity |
           split; [simpl; destruct (n1 >? n2); reflexivity | exact Hframes2]]
 
@@ -1057,7 +1016,7 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_GE_S]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
         eexists; split; [reflexivity |
           split; [simpl; destruct (n1 >=? n2); reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
 
@@ -1071,7 +1030,7 @@ Proof.
           as [st1 [Hexec1 [Hstack1 Hframes1]]];
         unfold compile_expr; fold compile_expr;
         rewrite (exec_after_some st0 (compile_expr env e1) [I32_EQZ] st1 Hexec1);
-        simpl; rewrite Hstack1; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack1; simpl;
         eexists; split; [reflexivity |
           split; [simpl; destruct b; reflexivity | rewrite Hframes1; reflexivity]]
 
@@ -1085,7 +1044,7 @@ Proof.
           as [st1 [Hexec1 [Hstack1 Hframes1]]];
         unfold compile_expr; fold compile_expr;
         rewrite (exec_after_some st0 (compile_expr env e1) [I32_CONST (-1); I32_MUL] st1 Hexec1);
-        simpl; rewrite Hstack1; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack1; simpl;
         eexists; split; [reflexivity |
           split; [simpl; rewrite Z.mul_opp_r; reflexivity | rewrite Hframes1; reflexivity]]
 
@@ -1102,12 +1061,12 @@ Proof.
                   [LOCAL_SET 255; LOCAL_GET 255; I32_CONST 0; I32_LT_S;
                    I32_CONST 0; LOCAL_GET 255; I32_SUB; LOCAL_GET 255; SELECT]
                   st1 Hexec1);
-        simpl; rewrite Hstack1; simpl;
-        eexists; split; [reflexivity | split; [simpl; case (Z.ltb n 0); reflexivity |]];
+        simpl; unfold exec_instr; simpl; rewrite Hstack1; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; case (Z.ltb n 0); reflexivity |]];
         apply (exec_instrs_preserves_frame_count st1
                  [LOCAL_SET 255; LOCAL_GET 255; I32_CONST 0; I32_LT_S;
                   I32_CONST 0; LOCAL_GET 255; I32_SUB; LOCAL_GET 255; SELECT]);
-        simpl; rewrite Hstack1; simpl; reflexivity
+        simpl; unfold exec_instr; simpl; rewrite Hstack1; simpl; reflexivity
 
     (* === CE_ARRAY_ACCESS — 利用 read_memory（空内存返回 V_I32 0）=== *)
     | H : corest_eval_expr ?env_s (CE_ARRAY_ACCESS ?arr ?idx) = Some ?v |- _ =>
@@ -1132,7 +1091,7 @@ Proof.
                   (compile_expr env arr) (compile_expr env idx)
                   [I32_ADD; I32_LOAD (Build_memory_arg 2 0)]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
         eexists; split; [reflexivity |
           split; [simpl; reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
 
@@ -1157,8 +1116,8 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_AND]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; destruct b, b0; reflexivity |
           unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
 
     (* === CE_OR — I32_OR，布尔值位运算等效 === *)
@@ -1182,8 +1141,8 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_OR]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; destruct b, b0; reflexivity |
           unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
 
     (* === CE_XOR — I32_XOR，布尔值 xorb 等效 === *)
@@ -1207,8 +1166,8 @@ Proof.
         rewrite (exec_after_some2 st0
                   (compile_expr env e1) (compile_expr env e2) [I32_XOR]
                   st1 st2 Hexec1 Hexec2);
-        simpl; rewrite Hstack2; simpl;
-        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+        simpl; unfold exec_instr; simpl; rewrite Hstack2; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; destruct b, b0; reflexivity |
           unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
 
     (* 兜底：对操作符变量做 destruct 使其落入具体分支（is_var 防止已具体化的变量循环） *)
@@ -1219,11 +1178,7 @@ Proof.
     | H : corest_eval_expr ?env_s (CE_COMP ?op ?e1 ?e2) = Some ?v |- _ =>
         is_var op; destruct op
     end.
-  all: repeat
-    match goal with
-    | |- exec_instrs _ _ = Some _ =>
-        unfold exec_instrs, exec_instr; cbn; reflexivity
-    end.
+  all: admit.
 Admitted.
 
 (* ================================================================
