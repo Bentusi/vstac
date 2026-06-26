@@ -122,6 +122,12 @@ Inductive promote_type : st_type -> st_type -> st_type -> Prop :=
   | Promote_byte_word : promote_type T_BYTE T_WORD T_WORD
   | Promote_byte_dword : promote_type T_BYTE T_DWORD T_DWORD
   | Promote_word_dword : promote_type T_WORD T_DWORD T_DWORD
+  | Promote_int_sint : promote_type T_INT T_SINT T_INT
+  | Promote_dint_sint : promote_type T_DINT T_SINT T_DINT
+  | Promote_dint_int : promote_type T_DINT T_INT T_DINT
+  | Promote_word_byte : promote_type T_WORD T_BYTE T_WORD
+  | Promote_dword_byte : promote_type T_DWORD T_BYTE T_DWORD
+  | Promote_dword_word : promote_type T_DWORD T_WORD T_DWORD
 .
 
 (* ================================================================
@@ -324,7 +330,7 @@ Inductive has_type : type_env -> st_expr -> st_type -> Prop :=
   | T_Compare : forall ctx e1 e2 op ty1 ty2,
       has_type ctx e1 ty1 ->
       has_type ctx e2 ty2 ->
-      type_compatible ty1 ty2 ->
+      (type_compatible ty1 ty2 \/ type_compatible ty2 ty1) ->
       has_type ctx (E_COMP op e1 e2) T_BOOL
   | T_And : forall ctx e1 e2,
       has_type ctx e1 T_BOOL ->

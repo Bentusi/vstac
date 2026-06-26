@@ -48,6 +48,22 @@ _CoqProject
 *.cmi
 *.cmxa
 *.cma
+
+# 提取生成的 OCaml 代码（Coq Extraction 产出）
+vstac/extraction/*.ml
+vstac/extraction/*.mli
+!vstac/extraction/vstac_main.ml
+
+# 编译后的可执行文件
+vstac/extraction/vstac
+
+# Dune 构建缓存
+_build/
+
+# 编辑器/IDE 临时文件
+*~
+*.swp
+*.swo
 *.o
 *.obj
 *.exe

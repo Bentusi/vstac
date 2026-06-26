@@ -498,6 +498,24 @@ int vm_run(VM *vm) {
     return result;
 }
 
+/* ================================================================
+   I/O 集成扫描周期
+   ================================================================ */
+
+int vm_scan_cycle(VM *vm, void *iomap)
+{
+    if (!vm) return -1;
+    if (!iomap) {
+        /* 无 I/O 映射: 仅执行 VM */
+        return vm_run(vm);
+    }
+
+    /* io_mapping_cycle 已在 io_mapping.c 中实现 */
+    /* 此处通过外部链接调用 */
+    extern int io_mapping_cycle(void *table, VM *vm);
+    return io_mapping_cycle(iomap, vm);
+}
+
 /**
  * vm_get_result - 获取执行结果（栈顶值）
  */

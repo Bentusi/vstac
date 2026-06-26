@@ -86,6 +86,15 @@ extern "C" {
 #define VM_ERR_INVALID_OPCODE   -7
 #define VM_ERR_FRAME_OVERFLOW   -8
 
+/* I/O 方向与类型 (匹配 rtos/abstract.h) */
+#define IO_DIR_INPUT    0
+#define IO_DIR_OUTPUT   1
+
+#define IO_TYPE_AI      0
+#define IO_TYPE_AO      1
+#define IO_TYPE_DI      2
+#define IO_TYPE_DO      3
+
 /* ================================================================
    类型定义
    ================================================================ */
@@ -209,6 +218,22 @@ bool sasm_validate(const SasmModule *module);
 /* safeasm_interp.c */
 int  vm_init(VM *vm, const SasmModule *module, uint32_t memory_size);
 int  vm_run(VM *vm);
+int  vm_execute_cycle(VM *vm);
+
+/* ================================================================
+   I/O 映射层集成接口
+   ================================================================ */
+
+/**
+ * vm_scan_cycle - 执行完整 I/O + VM 扫描周期
+ * @param vm    VM 实例
+ * @param iomap I/O 映射表 (可为 NULL, 此时仅执行 vm_run)
+ * @return 0 = 成功, 负值 = 错误码
+ *
+ * 此函数供 RTOS 适配层或裸机主循环调用。
+ * 执行顺序: 读输入 → VM执行 → 写输出
+ */
+int vm_scan_cycle(VM *vm, void *iomap);
 sasm_value vm_get_result(const VM *vm);
 
 #ifdef __cplusplus

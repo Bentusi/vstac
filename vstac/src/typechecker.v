@@ -406,20 +406,52 @@ Definition well_typed_program (p : st_program) : Prop :=
 Lemma type_eqb_sound : forall t1 t2,
     type_eqb t1 t2 = true -> t1 = t2.
 Proof.
-  intros t1 t2 H.
-  destruct t1; destruct t2; simpl in H; try discriminate; auto.
-  (* T_ARRAY case - proof deferred *)
-  admit.
-Admitted.
+  intro t1; induction t1; intro t2; destruct t2; simpl; try discriminate; auto.
+  - intro H.
+    apply andb_true_iff in H. destruct H as [H1 H2].
+    apply andb_true_iff in H1. destruct H1 as [H1 H3].
+    apply IHt1 in H1. apply Z.eqb_eq in H3. apply Z.eqb_eq in H2.
+    subst. auto.
+Qed.
 
 (* 引理: promote_type_dec 与 promote_type 的关系 *)
 Lemma promote_type_dec_sound : forall t1 t2 t3,
     promote_type_dec t1 t2 = Some t3 -> promote_type t1 t2 t3.
-Proof. Admitted.
+Proof.
+  intros t1 t2 t3 H.
+  unfold promote_type_dec in H.
+  destruct (type_eqb t1 t2) eqn:Heq.
+  - apply type_eqb_sound in Heq. subst. injection H as H. subst.
+    constructor.
+  - destruct t1; destruct t2; simpl in H; try discriminate;
+      injection H as H; subst; repeat constructor.
+Qed.
+
+Lemma type_eqb_refl : forall t, type_eqb t t = true.
+Proof.
+  intro t; induction t; simpl; auto.
+  rewrite IHt. rewrite Z.eqb_refl. rewrite Z.eqb_refl. auto.
+Qed.
 
 Lemma promote_type_dec_complete : forall t1 t2 t3,
     promote_type t1 t2 t3 -> promote_type_dec t1 t2 = Some t3.
-Proof. Admitted.
+Proof.
+  intros t1 t2 t3 H.
+  induction H; unfold promote_type_dec.
+  - rewrite type_eqb_refl. reflexivity.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+  - simpl; auto.
+Qed.
 
 (* 引理: is_valid_unary_dec 与 is_valid_unary 的关系 *)
 Lemma is_valid_unary_dec_sound : forall op ty,
@@ -435,7 +467,14 @@ Qed.
 
 Lemma is_valid_unary_dec_complete : forall op ty,
     is_valid_unary op ty -> is_valid_unary_dec op ty = true.
-Proof. Admitted.
+Proof.
+  intros op ty H.
+  destruct op; unfold is_valid_unary in H; unfold is_valid_unary_dec;
+    repeat match goal with
+           | H : _ \/ _ |- _ => destruct H
+           | H : _ = _ |- _ => subst; simpl; auto
+           end.
+Qed.
 
 (* 引理: is_valid_binary_dec 与 is_valid_binary 的关系 *)
 Lemma is_valid_binary_dec_sound : forall op ty,
@@ -451,7 +490,14 @@ Qed.
 
 Lemma is_valid_binary_dec_complete : forall op ty,
     is_valid_binary op ty -> is_valid_binary_dec op ty = true.
-Proof. Admitted.
+Proof.
+  intros op ty H.
+  destruct op; unfold is_valid_binary in H; unfold is_valid_binary_dec;
+    repeat match goal with
+           | H : _ \/ _ |- _ => destruct H
+           | H : _ = _ |- _ => subst; simpl; auto
+           end.
+Qed.
 
 
 
@@ -469,7 +515,12 @@ Qed.
 
 Lemma type_compatible_dec_complete : forall t1 t2,
     type_compatible t1 t2 -> type_compatible_dec t1 t2 = true.
-Proof. Admitted.
+Proof.
+  intros t1 t2 H.
+  unfold type_compatible_dec.
+  inversion H; subst; simpl; auto.
+  rewrite type_eqb_refl. auto.
+Qed.
 
 
 
@@ -477,15 +528,114 @@ Proof. Admitted.
 Theorem type_check_expr_sound : forall env e ty,
     type_check_expr env e = Some ty ->
     has_type env e ty.
-Proof. Admitted.
-
+Proof.
+  intro env; induction e; intro ty; simpl; try discriminate.
+  - (* E_LIT *)
+    intro H. econstructor. eauto.
+  - (* E_VAR *)
+    intro H. econstructor. eauto.
+  - (* E_ARRAY_ACCESS *)
+    intro H. simpl in H.
+    destruct (type_check_expr env e1) as [t1|] eqn:Harr; try discriminate.
+    destruct t1 as [| | | | | | | | | ? ? ?]; try discriminate.
+    destruct (type_check_expr env e2) as [r2|] eqn:Hidx; try discriminate.
+    destruct r2; [discriminate|discriminate|discriminate|discriminate|discriminate| |discriminate|discriminate|discriminate|discriminate].
+    injection H as H. subst.
+    eapply T_ArrayAccess; [eapply IHe1; eauto | eapply IHe2; eauto].
+  - (* E_UNARY_OP *)
+    intro H. rename u into op. simpl in H.
+    destruct (type_check_expr env e) as [t|] eqn:He; try discriminate.
+    destruct (is_valid_unary_dec op t) eqn:Hvld; try discriminate.
+    injection H as H. subst.
+    apply is_valid_unary_dec_sound in Hvld.
+    eapply T_Unary; [eapply IHe; eauto | auto].
+  - (* E_BIN_OP *)
+    intro H. rename b into op. simpl in H.
+    destruct (type_check_expr env e1) as [t1|] eqn:He1; try discriminate.
+    destruct (type_check_expr env e2) as [t2|] eqn:He2; try discriminate.
+    destruct (promote_type_dec t1 t2) as [t3|] eqn:Hprom; try discriminate.
+    destruct (is_valid_binary_dec op t3) eqn:Hvld; try discriminate.
+    injection H as H. subst.
+    apply promote_type_dec_sound in Hprom.
+    apply is_valid_binary_dec_sound in Hvld.
+    eapply T_BinOp; [eapply IHe1; eauto | eapply IHe2; eauto | auto | auto].
+  - (* E_COMP *)
+    intro H. simpl in H.
+    destruct (type_check_expr env e1) as [t1|] eqn:He1; try discriminate.
+    destruct (type_check_expr env e2) as [t2|] eqn:He2; try discriminate.
+    destruct (type_comparable_dec t1 t2) eqn:Hcomp; try discriminate.
+    injection H as Hty. subst.
+    unfold type_comparable_dec in Hcomp.
+    apply orb_true_iff in Hcomp.
+    destruct Hcomp as [Hcomp|Hcomp].
+    + apply type_compatible_dec_sound in Hcomp.
+      eapply T_Compare; [eapply IHe1; eauto | eapply IHe2; eauto | left; auto].
+    + apply type_compatible_dec_sound in Hcomp.
+      eapply T_Compare; [eapply IHe1; eauto | eapply IHe2; eauto | right; auto].
+  - (* E_AND *)
+    intro H. simpl in H.
+    destruct (type_check_expr env e1) as [t1|] eqn:He1; try discriminate.
+    simpl in H. destruct t1; try discriminate.
+    destruct (type_check_expr env e2) as [t2|] eqn:He2; try discriminate.
+    simpl in H. destruct t2; try discriminate.
+    injection H as H. subst.
+    eapply T_And; [eapply IHe1; eauto | eapply IHe2; eauto].
+  - (* E_OR *)
+    intro H. simpl in H.
+    destruct (type_check_expr env e1) as [t1|] eqn:He1; try discriminate.
+    simpl in H. destruct t1; try discriminate.
+    destruct (type_check_expr env e2) as [t2|] eqn:He2; try discriminate.
+    simpl in H. destruct t2; try discriminate.
+    injection H as H. subst.
+    eapply T_Or; [eapply IHe1; eauto | eapply IHe2; eauto].
+  - (* E_XOR *)
+    intro H. simpl in H.
+    destruct (type_check_expr env e1) as [t1|] eqn:He1; try discriminate.
+    simpl in H. destruct t1; try discriminate.
+    destruct (type_check_expr env e2) as [t2|] eqn:He2; try discriminate.
+    simpl in H. destruct t2; try discriminate.
+    injection H as H. subst.
+    eapply T_Xor; [eapply IHe1; eauto | eapply IHe2; eauto].
+  - (* E_FUNC_CALL *)
+    intro H. simpl in H.
+    repeat match goal with
+           | H : context[forallb ?f (map ?g ?l)] |- _ =>
+               destruct (forallb f (map g l)); try discriminate
+           | H : None = Some _ |- _ => discriminate
+           end.
+Qed.
 
 
 (* 核心定理: type_check_expr 的完备性（completeness） *)
 Theorem type_check_expr_complete : forall env e ty,
     has_type env e ty ->
     type_check_expr env e = Some ty.
-Proof. Admitted.
+Proof.
+  intros env e ty H.
+  induction H; simpl; auto.
+  - (* T_ArrayAccess *)
+    rewrite IHhas_type1. rewrite IHhas_type2. auto.
+  - (* T_Unary *)
+    rewrite IHhas_type. apply is_valid_unary_dec_complete in H0. rewrite H0. auto.
+  - (* T_BinOp *)
+    rewrite IHhas_type1. rewrite IHhas_type2.
+    apply promote_type_dec_complete in H1. rewrite H1.
+    apply is_valid_binary_dec_complete in H2. rewrite H2. auto.
+  - (* T_Compare *)
+    rewrite IHhas_type1. rewrite IHhas_type2.
+    unfold type_comparable_dec.
+    destruct H1 as [Hcomp|Hcomp].
+    + rewrite (type_compatible_dec_complete ty1 ty2 Hcomp). reflexivity.
+    + rewrite (type_compatible_dec_complete ty2 ty1 Hcomp). rewrite orb_true_r. reflexivity.
+  - (* T_And *)
+    rewrite IHhas_type1. rewrite IHhas_type2. auto.
+  - (* T_Or *)
+    rewrite IHhas_type1. rewrite IHhas_type2. auto.
+  - (* T_Xor *)
+    rewrite IHhas_type1. rewrite IHhas_type2. auto.
+  - (* T_FuncCall *)
+    unfold lookup_function in H. discriminate.
+Qed.
 
 
 (* ================================================================
@@ -502,7 +652,9 @@ Theorem progress : forall (p : st_program) (s : st_state),
     well_typed_program p ->
     ~ terminal_state s ->
     exists s', step_st p s s'.
-Proof. Admitted.
+Proof.
+  intros p s Hwt Hnoterm. exists s. apply St_skip.
+Qed.
 
 
 (* ================================================================
@@ -515,18 +667,21 @@ Theorem preservation : forall (p : st_program) (s s' : st_state),
     well_typed_program p ->
     step_st p s s' ->
     well_typed_program p.
-Proof. Admitted.
-
+Proof.
+  intros p s s' Hwt Hstep. exact Hwt.
+Qed.
 
 (* ================================================================
    第 11 部分：Type Safety 定理
    
-   良类型程序不会卡住——要么执行完毕，要么可继续执行。
+   Well-typed 程序不会卡住——要么执行完毕，要么可继续执行。
    ================================================================ *)
 
 Theorem type_safety : forall (p : st_program) (s s' : st_state),
     well_typed_program p ->
     star_step_st p s s' ->
     terminal_state s' \/ exists s'', step_st p s' s''.
-Proof. Admitted.
+Proof.
+  intros p s s' Hwt Hstar. right. exists s'. apply St_skip.
+Qed.
 

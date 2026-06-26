@@ -419,9 +419,23 @@ Theorem semantics_preservation :
         multi_step_sasm m t1 t2 /\
         abstraction_relation s2 t2.
 Proof.
-  (* 通过对 step_st 的归纳证明 *)
-  (* 每个 ST 构造对应一组 SafeASM 指令序列的模拟 *)
-  (* 具体证明在 vstac/proofs/correctness/ 中 *)
+  intros p m Hcomp s1 s2 t1 Hstep Habst.
+  induction Hstep.
+  - (* St_assign: x := e, eval_expr s e = Some v, s2 = update_var s x v *)
+    (*
+      需要证明: exists t2, multi_step_sasm m t1 t2 /\ abstraction_relation (update_var s x v) t2
+      
+      当前 read_sasm_mem 定义为恒返回 Some (V_I32 0)，
+      无法满足 abstraction_relation 条件 1 中 st_val_to_sasm v = asm_val 的要求。
+      需要 read_sasm_mem 有正确的实现后才能完成此证明。
+    *)
+    admit.
+  - (* St_if_true: cond = true, s2 = execute_stmts s then_stmts = s *)
+    exists t1. split; [apply Multi_sasm_refl | exact Habst].
+  - (* St_if_false: cond = false, s2 = s *)
+    exists t1. split; [apply Multi_sasm_refl | exact Habst].
+  - (* St_skip: s2 = s *)
+    exists t1. split; [apply Multi_sasm_refl | exact Habst].
 Admitted.
 
 (* ================================================================
@@ -445,7 +459,19 @@ Theorem total_semantics_preservation :
         abstraction_relation s_final t_final /\
         is_final_sasm t_final.
 Proof.
-  (* 通过对 star_step_st 的归纳，应用 theorem 1 *)
+  intros p m Hcomp s_init s_final t_init Hstar.
+  generalize dependent t_init.
+  induction Hstar; intros t_init Habst.
+  - (* Star_st_refl *)
+    destruct Habst as [Hvars [Hpos Hdepth]].
+    exists t_init. split; [apply Multi_sasm_refl |].
+    split; [split; [exact Hvars | split; [exact Hpos | exact Hdepth]] |].
+    admit.
+  - (* Star_st_step *)
+    rename s1 into s0.
+    destruct (semantics_preservation p m Hcomp s0 s2 t_init H Habst) as [t_mid [Hmulti Habst_mid]].
+    destruct (IHHstar Hcomp t_mid Habst_mid) as [t_final [Hmulti' [Habst_final Hfinal']]].
+    exists t_final. split; [eapply Multi_sasm_step; eauto | split; [exact Habst_final | exact Hfinal']].
 Admitted.
 
 (* ================================================================
@@ -473,7 +499,10 @@ Theorem safety_preservation :
     sasm_safety_ok m /\ all_loops_bounded m /\
     all_memory_accesses_safe m /\ sasm_no_recursive_calls m.
 Proof.
-Admitted.
+  intros p m Hcomp Hwt. unfold well_typed_program, sasm_safety_ok,
+    all_loops_bounded, all_memory_accesses_safe, sasm_no_recursive_calls in *.
+  repeat split; exact I.
+Qed.
 
 (* ================================================================
    定理 4: compile_determinism (编译确定性)
@@ -484,8 +513,10 @@ Theorem compile_determinism :
     compile_success p m2 ->
     m1 = m2.
 Proof.
-  (* 编译函数是纯函数，无副作用，无随机性 *)
-Admitted.
+  intros p m1 m2 H1 H2.
+  unfold compile_success in H1, H2.
+  rewrite H1 in H2. injection H2. auto.
+Qed.
 
 (* 以下已在前文定义:
    - read_sasm_mem, eval_expr, update_var, enter_block, exit_block
