@@ -38,9 +38,156 @@ Record st_state : Type := {
   st_cycle_cnt : Z;                         (* 周期计数 *)
 }.
 
-(* ST 表达式求值（简化占位，实现在 src/ 中细化） *)
-Definition eval_expr (s : st_state) (e : st_expr) : option st_value :=
-  None.
+(* 二元整数运算辅助 *)
+Definition eval_binop_int (op : binary_op) (n1 n2 : Z) : Z :=
+  match op with
+  | B_ADD => n1 + n2
+  | B_SUB => n1 - n2
+  | B_MUL => n1 * n2
+  | B_DIV => if Z.eqb n2 0 then 0 else n1 / n2
+  | B_MOD => if Z.eqb n2 0 then 0 else n1 mod n2
+  end.
+
+(* 二元浮点运算辅助 *)
+Definition eval_binop_float (op : binary_op) (f1 f2 : float) : float :=
+  f1.  (* 简化：浮点运算待完善 *)
+
+(* 整数比较辅助 *)
+Definition eval_compare_int (op : compare_op) (n1 n2 : Z) : bool :=
+  match op with
+  | C_EQ => Z.eqb n1 n2
+  | C_NE => negb (Z.eqb n1 n2)
+  | C_LT => Z.ltb n1 n2
+  | C_LE => Z.leb n1 n2
+  | C_GT => Z.ltb n2 n1
+  | C_GE => Z.leb n2 n1
+  end.
+
+(* 浮点比较辅助 *)
+Definition eval_compare_float (op : compare_op) (f1 f2 : float) : bool :=
+  match op with
+  | C_EQ => true   (* 简化 *)
+  | C_NE => false
+  | C_LT => false
+  | C_LE => true
+  | C_GT => false
+  | C_GE => true
+  end.
+
+(* 布尔比较辅助 *)
+Definition eval_compare_bool (op : compare_op) (b1 b2 : bool) : bool :=
+  match op with
+  | C_EQ => Bool.eqb b1 b2
+  | C_NE => negb (Bool.eqb b1 b2)
+  | C_LT => b1 && negb b2
+  | C_LE => negb b1 || b2
+  | C_GT => negb b1 && b2
+  | C_GE => b1 || negb b2
+  end.
+
+(* 辅助：从状态中查找变量值 *)
+Fixpoint lookup_var (vars : list (ident * st_value)) (x : ident) {struct vars} : option st_value :=
+  match vars with
+  | nil => None
+  | (y, v) :: rest =>
+      if ident_eq x y then Some v
+      else lookup_var rest x
+  end.
+
+(* ST 表达式求值 *)
+Fixpoint eval_expr (s : st_state) (e : st_expr) : option st_value :=
+  match e with
+  | E_LIT l =>
+      match l with
+      | L_INT n    => Some (ST_V_INT n)
+      | L_REAL f   => Some (ST_V_REAL f)
+      | L_BOOL b   => Some (ST_V_BOOL b)
+      | L_TIME t   => Some (ST_V_TIME t)
+      end
+
+  | E_VAR x => lookup_var s.(st_vars) x
+
+  | E_ARRAY_ACCESS arr idx =>
+      match eval_expr s arr with
+      | Some _ =>
+          match eval_expr s idx with
+          | Some (ST_V_INT _) => Some (ST_V_INT 0)
+          | _ => None
+          end
+      | _ => None
+      end
+
+  | E_UNARY_OP op e1 =>
+      match eval_expr s e1 with
+      | Some v =>
+          match op, v with
+          | U_NEG, ST_V_INT n    => Some (ST_V_INT (- n))
+          | U_NEG, ST_V_SINT n   => Some (ST_V_SINT (- n))
+          | U_NEG, ST_V_DINT n   => Some (ST_V_DINT (- n))
+          | U_NEG, ST_V_REAL f   => Some (ST_V_REAL f)
+          | U_NOT, ST_V_BOOL b   => Some (ST_V_BOOL (negb b))
+          | U_ABS, ST_V_INT n    => Some (ST_V_INT (Z.abs n))
+          | U_ABS, ST_V_SINT n   => Some (ST_V_SINT (Z.abs n))
+          | U_ABS, ST_V_DINT n   => Some (ST_V_DINT (Z.abs n))
+          | U_ABS, ST_V_REAL f   => Some (ST_V_REAL f)
+          | _, _ => None
+          end
+      | None => None
+      end
+
+  | E_BIN_OP op e1 e2 =>
+      match eval_expr s e1, eval_expr s e2 with
+      | Some (ST_V_INT n1), Some (ST_V_INT n2) =>
+          Some (ST_V_INT (eval_binop_int op n1 n2))
+      | Some (ST_V_DINT n1), Some (ST_V_DINT n2) =>
+          Some (ST_V_DINT (eval_binop_int op n1 n2))
+      | Some (ST_V_REAL f1), Some (ST_V_REAL f2) =>
+          Some (ST_V_REAL (eval_binop_float op f1 f2))
+      | Some (ST_V_INT n1), Some (ST_V_DINT n2) =>
+          Some (ST_V_DINT (eval_binop_int op n1 n2))
+      | Some (ST_V_DINT n1), Some (ST_V_INT n2) =>
+          Some (ST_V_DINT (eval_binop_int op n1 n2))
+      | _, _ => None
+      end
+
+  | E_COMP op e1 e2 =>
+      match eval_expr s e1, eval_expr s e2 with
+      | Some (ST_V_INT n1), Some (ST_V_INT n2) =>
+          Some (ST_V_BOOL (eval_compare_int op n1 n2))
+      | Some (ST_V_DINT n1), Some (ST_V_DINT n2) =>
+          Some (ST_V_BOOL (eval_compare_int op n1 n2))
+      | Some (ST_V_REAL f1), Some (ST_V_REAL f2) =>
+          Some (ST_V_BOOL (eval_compare_float op f1 f2))
+      | Some (ST_V_BOOL b1), Some (ST_V_BOOL b2) =>
+          Some (ST_V_BOOL (eval_compare_bool op b1 b2))
+      | _, _ => None
+      end
+
+  | E_AND e1 e2 =>
+      match eval_expr s e1, eval_expr s e2 with
+      | Some (ST_V_BOOL b1), Some (ST_V_BOOL b2) =>
+          Some (ST_V_BOOL (b1 && b2))
+      | _, _ => None
+      end
+
+  | E_OR e1 e2 =>
+      match eval_expr s e1, eval_expr s e2 with
+      | Some (ST_V_BOOL b1), Some (ST_V_BOOL b2) =>
+          Some (ST_V_BOOL (b1 || b2))
+      | _, _ => None
+      end
+
+  | E_XOR e1 e2 =>
+      match eval_expr s e1, eval_expr s e2 with
+      | Some (ST_V_BOOL b1), Some (ST_V_BOOL b2) =>
+          Some (ST_V_BOOL (xorb b1 b2))
+      | _, _ => None
+      end
+
+  | E_FUNC_CALL f args =>
+      (* 简化：函数调用返回默认值 *)
+      Some (ST_V_INT 0)
+  end.
 
 (* ST 状态更新 *)
 Definition update_var (s : st_state) (x : ident) (v : st_value) : st_state :=
@@ -60,7 +207,7 @@ Definition exit_block (s : st_state) : st_state :=
   s.
 
 (* FOR 循环初始化 *)
-Definition init_for_loop (s : st_state) (v : ident) (start end_ : Z) (body : list st_stmt) : st_state :=
+Definition init_for_loop (s : st_state) (v : ident) (start_val end_val : st_value) (body : list st_stmt) : st_state :=
   s.
 
 (* 循环未结束判断 *)
@@ -91,14 +238,37 @@ Definition pop_call_frame (s : st_state) (ret_val : st_value) : st_state :=
 (* 执行 FB *)
 Definition execute_fb (s : st_state) (fb_def : st_pou) (params : list (ident * st_expr)) : st_state :=
   s.
+(* 辅助：执行一组语句（简化） *)
+Definition execute_stmts (s : st_state) (stmts : list st_stmt) : st_state :=
+  s.
 
+(* 辅助：执行 CASE 语句（选择匹配分支，简化） *)
+Definition execute_case (s : st_state) (sel : st_expr) (branches : list case_element) (default : option (list st_stmt)) : st_state :=
+  s.
 (* ST 小步语义: step_st p s s'
-   ST 程序 p 从状态 s 执行一步到 s' *)
+   ST 程序 p 从状态 s 执行一步到 s'
+   
+   每条语句类型对应一到多条执行规则。
+   对于复合语句（IF/WHILE/FOR等），只需要一条规则表达整条语句的语义。 *)
 Inductive step_st : st_program -> st_state -> st_state -> Prop :=
   (* 赋值语句: x := e, 计算 e 的值后更新 x *)
   | St_assign : forall p s x e v,
       eval_expr s e = Some v ->
       step_st p s (update_var s x v)
+
+  (* IF 语句: 条件为真，执行 then 分支 *)
+  | St_if_true : forall p s cond then_stmts,
+      eval_expr s cond = Some (ST_V_BOOL true) ->
+      step_st p s (execute_stmts s then_stmts)
+
+  (* IF 语句: 条件为假，跳过 *)
+  | St_if_false : forall p s cond,
+      eval_expr s cond = Some (ST_V_BOOL false) ->
+      step_st p s s
+
+  (* CASE/FOR/WHILE/REPEAT: 简化：执行后状态不变 *)
+  | St_skip : forall p s,
+      step_st p s s
 .
 
 (* ST 多步执行 *)
