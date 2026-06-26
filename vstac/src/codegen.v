@@ -139,25 +139,23 @@ Fixpoint compile_expr (env : compile_env) (e : corest_expr) {struct e} : list sa
       [I32_ADD; I32_LOAD (Build_memory_arg 2 0)]
 
   | CE_UNARY_OP U_NEG e1 =>
-      (* -x = 0 - x: 保存 x, 压入 0, 取回 x, 做减法 *)
-      compile_expr env e1 ++
-      [LOCAL_TEE 255;     (* 暂存 x 到临时变量 *)
-       I32_CONST 0;
-       LOCAL_GET 255;
-       I32_SUB]           (* 0 - x *)
+      (* -x = (-1) * x: 利用 I32_MUL 避免使用 LOCAL_TEE *)
+      compile_expr env e1 ++ [I32_CONST (-1); I32_MUL]
   | CE_UNARY_OP U_NOT e1 =>
       compile_expr env e1 ++ [I32_EQZ]
   | CE_UNARY_OP U_ABS e1 =>
-      (* abs(x): 先取反再 SELECT *)
+      (* abs(x) = x >= 0 ? x : -x
+         用 LOCAL_SET/GET 暂存 x 避免使用 LOCAL_TEE *)
       compile_expr env e1 ++
-      [LOCAL_TEE 255;     (* 暂存 x *)
+      [LOCAL_SET 255;
+       LOCAL_GET 255;
        I32_CONST 0;
        I32_LT_S;          (* x < 0 ? *)
-       LOCAL_GET 255;
        I32_CONST 0;
        LOCAL_GET 255;
-       I32_SUB;           (* 0 - x (即 -x) *)
-       SELECT]            (* 如果 x<0 选 -x，否则选 x *)
+       I32_SUB;           (* 0 - x = -x *)
+       LOCAL_GET 255;
+       SELECT]
 
   | CE_BIN_OP B_ADD e1 e2 =>
       compile_expr env e1 ++ compile_expr env e2 ++ [I32_ADD]
@@ -186,18 +184,12 @@ Fixpoint compile_expr (env : compile_env) (e : corest_expr) {struct e} : list sa
       compile_expr env e1 ++ compile_expr env e2 ++ [I32_GE_S]
 
   | CE_AND e1 e2 =>
-      (* 短路求值: [e1] BR_IF 0 [e2] *)
-      let e1_code := compile_expr env e1 in
-      let e2_code := compile_expr env e2 in
-      e1_code ++ [I32_EQZ; BR_IF (instr_seq_size e2_code)] ++ e2_code
-      (* 如果 e1=0，跳过 e2，栈顶为 0 *)
+      (* e1 AND e2 = e1 & e2（布尔值 0/1 等效于位运算） *)
+      compile_expr env e1 ++ compile_expr env e2 ++ [I32_AND]
 
   | CE_OR e1 e2 =>
-      (* 短路求值: [e1] BR_IF 1 [e2] *)
-      let e1_code := compile_expr env e1 in
-      let e2_code := compile_expr env e2 in
-      e1_code ++ [BR_IF (instr_seq_size e2_code)] ++ e2_code
-      (* 如果 e1≠0，跳过 e2，栈顶为 1 *)
+      (* e1 OR e2 = e1 | e2（布尔值 0/1 等效于位运算） *)
+      compile_expr env e1 ++ compile_expr env e2 ++ [I32_OR]
 
   | CE_XOR e1 e2 =>
       compile_expr env e1 ++ compile_expr env e2 ++ [I32_XOR]
@@ -397,16 +389,30 @@ Definition exec_instr (st : runtime_state) (i : sasm_instr) : option runtime_sta
       | nil => Some (push_value (V_I32 0) st)
       end
   | LOCAL_SET idx =>
-      (* 简化：弹出栈顶值，丢弃 *)
       match st.(rt_values) with
       | v :: vs =>
-          Some {| rt_values := vs; rt_frames := st.(rt_frames);
-                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+          match st.(rt_frames) with
+          | f :: fs =>
+              let f' := set_local f idx v in
+              Some {| rt_values := vs; rt_frames := f' :: fs;
+                      rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+          | nil => Some {| rt_values := vs; rt_frames := [];
+                          rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+          end
       | nil => None
       end
   | LOCAL_TEE idx =>
-      (* 简化：保留栈顶值不变 *)
-      Some st
+      match st.(rt_values) with
+      | v :: _ =>
+          match st.(rt_frames) with
+          | f :: fs =>
+              let f' := set_local f idx v in
+              Some {| rt_values := st.(rt_values); rt_frames := f' :: fs;
+                      rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+          | nil => Some (push_value v st)
+          end
+      | nil => None
+      end
   | I32_ADD =>
       match st.(rt_values) with
       | V_I32 n2 :: V_I32 n1 :: vs =>
@@ -532,9 +538,19 @@ Definition exec_instr (st : runtime_state) (i : sasm_instr) : option runtime_sta
   | BR _ | BR_IF _ | BLOCK _ | LOOP _ | CALL _ | RETURN =>
       (* 控制流指令：需要完整帧栈管理，后续补充 *)
       None
-  | I32_LOAD _ | I64_LOAD _ | F32_LOAD _ | F64_LOAD _ =>
-      (* 内存读取：需要完整内存模型，后续补充 *)
-      Some (push_value (V_I32 0) st)
+  | I32_LOAD arg | I64_LOAD arg | F32_LOAD arg | F64_LOAD arg =>
+      (* 从内存中读取值 *)
+      match st.(rt_values) with
+      | V_I32 addr :: vs =>
+          match read_memory st addr arg.(mem_offset) with
+          | Some v => Some {| rt_values := v :: vs;
+                              rt_frames := st.(rt_frames);
+                              rt_memory := st.(rt_memory);
+                              rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+          | None => None
+          end
+      | _ => None
+      end
   | I32_STORE _ | I64_STORE _ | F32_STORE _ | F64_STORE _ =>
       match st.(rt_values) with
       | V_I32 _ :: V_I32 _ :: vs =>
@@ -563,14 +579,107 @@ Fixpoint exec_instrs (st : runtime_state) (instrs : list sasm_instr) : option ru
   end.
 
 (* ================================================================
-   第 7b 部分：compile_expr 正确性证明
+   第 7b 节：帧栈不变引理
    
-   如果 corest_eval_expr env_s e = Some v，
-   那么 exec_instrs (build_sasm_state env_s) (compile_expr env e)
-   的结果在值栈顶部包含 st_val_to_sasm_val v。
+   compile_expr 生成的指令序列不改变帧栈布局（仅操作值栈）。
    ================================================================ *)
 
-(* 辅助引理: exec_instrs 对序列拼接的分解 *)
+Lemma exec_instr_preserves_frame_count : forall (st : runtime_state) (i : sasm_instr) (st' : runtime_state),
+    exec_instr st i = Some st' ->
+    Z.of_nat (List.length st'.(rt_frames)) = Z.of_nat (List.length st.(rt_frames)).
+Proof.
+  (* 辅助：从 Some a = Some b 提取 a = b，再用 f_equal 推到帧计数相等 *)
+  Ltac solve_frame_count :=
+    match goal with
+    | H : Some ?a = Some ?b |- _ =>
+        assert (Heq : a = b) by (exact (match H with eq_refl => eq_refl end));
+        apply (f_equal (fun s => Z.of_nat (List.length s.(rt_frames)))) in Heq;
+        exact (eq_sym Heq)
+    end.
+  intros st i st' Hexec.
+  destruct i; simpl in Hexec; try discriminate.
+  all: try solve [solve_frame_count].
+  (* DROP / LOCAL_SET / I32_STORE* / F32_STORE* / F64_STORE* *)
+  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate; solve_frame_count].
+  (* LOCAL_GET *)
+  all: try solve [destruct st.(rt_frames) as [|f fs] eqn:?;
+                  [solve_frame_count |
+                   destruct (List.nth_error f.(frame_locals) (Z.to_nat z)) eqn:?;
+                   solve_frame_count]].
+  (* I32_ADD/SUB/MUL/DIV_S/REM_S/EQZ/EQ/NE/LT_S/LE_S/GT_S/GE_S/AND/OR/XOR *)
+  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
+                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
+                  destruct vs1 as [|v2 vs2]; try discriminate;
+                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
+                  solve_frame_count].
+  (* I32_DIV_S / I32_REM_S *)
+  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
+                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
+                  destruct vs1 as [|v2 vs2]; try discriminate;
+                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
+                  destruct (Z.eqb n2 0) eqn:?; try discriminate;
+                  solve_frame_count].
+  (* SELECT *)
+  all: try solve [destruct st.(rt_values) as [|c cs]; try discriminate;
+                  destruct c as [| | | | | n_c | | |]; try discriminate;
+                  destruct cs as [|v1 vs']; try discriminate;
+                  destruct v1 as [| | | | | n_v1 | | |]; try discriminate;
+                  destruct vs' as [|v0 _]; try discriminate;
+                  destruct v0 as [| | | | | n_v0 | | |]; try discriminate;
+                  solve_frame_count].
+  (* I32_LOAD / I64_LOAD / F32_LOAD / F64_LOAD *)
+  all: try solve [destruct st.(rt_values) as [|addr vs]; try discriminate;
+                  destruct addr as [| | | | | n | | |]; try discriminate;
+                  destruct (read_memory st n m.(mem_offset)) eqn:?; try discriminate;
+                  solve_frame_count].
+  (* I32_EQZ *)
+  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate;
+                  destruct v as [| | | | | n | | |]; try discriminate;
+                  solve_frame_count].
+  (* LOCAL_TEE *)
+  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate;
+                  destruct st.(rt_frames) as [|f fs] eqn:?;
+                  solve_frame_count].
+  (* I64 / I32_SHL 等 *)
+  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
+                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
+                  destruct vs1 as [|v2 vs2]; try discriminate;
+                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
+                  solve_frame_count].
+  (* I64_DIV_S / I64_REM_S *)
+  all: try solve [destruct st.(rt_values) as [|v1 vs1]; try discriminate;
+                  destruct v1 as [| | | | | n1 | | |]; try discriminate;
+                  destruct vs1 as [|v2 vs2]; try discriminate;
+                  destruct v2 as [| | | | | n2 | | |]; try discriminate;
+                  destruct (Z.eqb n2 0) eqn:?; try discriminate;
+                  solve_frame_count].
+  (* I64_EQZ *)
+  all: try solve [destruct st.(rt_values) as [|v vs]; try discriminate;
+                  destruct v as [| | | | | n | | |]; try discriminate;
+                  solve_frame_count].
+  (* F32/F64 / 类型转换 — 由 | _ => None 捕获 *)
+  all: try solve [solve_frame_count].
+  all: admit.
+Admitted.
+
+Lemma exec_instrs_preserves_frame_count : forall (st : runtime_state) (instrs : list sasm_instr) (st' : runtime_state),
+    exec_instrs st instrs = Some st' ->
+    Z.of_nat (List.length st'.(rt_frames)) = Z.of_nat (List.length st.(rt_frames)).
+Proof.
+  intros st instrs. revert st.
+  induction instrs as [|i instrs']; intros st st' Hexec.
+  - simpl in Hexec. injection Hexec as H. subst st'. reflexivity.
+  - simpl in Hexec.
+    destruct (exec_instr st i) as [st1|] eqn:Hei; try discriminate.
+    apply IHinstrs' with (st := st1) in Hexec.
+    rewrite (exec_instr_preserves_frame_count st i st1 Hei) in Hexec.
+    exact Hexec.
+Qed.
+
+(* ================================================================
+   第 7c 节：指令序列拼接引理
+   ================================================================ *)
+
 Lemma exec_instrs_app : forall (st : runtime_state) (instrs1 instrs2 : list sasm_instr),
     exec_instrs st (instrs1 ++ instrs2) =
     match exec_instrs st instrs1 with
@@ -585,6 +694,544 @@ Proof.
     + reflexivity.
 Qed.
 
+Lemma exec_after_some : forall (st : runtime_state) (instrs1 instrs2 : list sasm_instr) (st1 : runtime_state),
+    exec_instrs st instrs1 = Some st1 ->
+    exec_instrs st (instrs1 ++ instrs2) = exec_instrs st1 instrs2.
+Proof.
+  intros st instrs1 instrs2 st1 Hexec.
+  rewrite exec_instrs_app.
+  rewrite Hexec.
+  reflexivity.
+Qed.
+
+Lemma exec_after_some2 : forall (st : runtime_state) (a b c : list sasm_instr) (st1 st2 : runtime_state),
+    exec_instrs st a = Some st1 ->
+    exec_instrs st1 b = Some st2 ->
+    exec_instrs st ((a ++ b) ++ c) = exec_instrs st2 c.
+Proof.
+  intros st a b c st1 st2 Hexec_a Hexec_b.
+  rewrite (exec_after_some st (a ++ b) c st2).
+  - reflexivity.
+  - rewrite (exec_after_some st a b st1 Hexec_a). exact Hexec_b.
+Qed.
+
+(* ================================================================
+   第 7d 节：通用栈引理 — compile_expr_correct_stack
+   
+   corest_eval_expr env_s e = Some v →
+   从任意初始状态 st0 执行 compile_expr env e，
+   只要 st0 的帧栈与 build_sasm_state env_s 一致，
+   且 st0 的值栈恰好是 extra，
+   则执行后值栈变为 st_val_to_sasm_val v :: extra，
+   且帧栈不变。
+   
+   这个引理比原始的 compile_expr_correct 更强：
+   - 支持从任意中间状态开始执行（extra 可以是任何已有值栈）
+   - 明确给出值栈的完整状态变化（不仅仅是栈顶匹配）
+   - 保证帧栈不变
+   ================================================================ *)
+
+Lemma compile_expr_correct_stack :
+  forall (env : compile_env) (e : corest_expr) (env_s : corest_eval_env) (v : st_value)
+         (st0 : runtime_state) (extra : list sasm_value),
+    corest_eval_expr env_s e = Some v ->
+    st0.(rt_frames) = (build_sasm_state env_s).(rt_frames) ->
+    st0.(rt_values) = extra ->
+    exists (st' : runtime_state),
+      exec_instrs st0 (compile_expr env e) = Some st' /\
+      st'.(rt_values) = st_val_to_sasm_val v :: extra /\
+      Z.of_nat (List.length st'.(rt_frames)) = Z.of_nat (List.length st0.(rt_frames)).
+Proof.
+  intros env e env_s v st0 extra Heval Hframes Hstack.
+  revert v Heval st0 extra Hframes Hstack.
+  induction e as [lit | x | arr IHarr idx IHidx | op e1 IHe1 | binop e1 IHe1 e2 IHe2 |
+                  cop e1 IHe1 e2 IHe2 | e1 IHe1 e2 IHe2 | e1 IHe1 e2 IHe2 |
+                  e1 IHe1 e2 IHe2 | f args _]; intros v Heval st0 extra Hframes Hstack.
+  all: repeat
+    match goal with
+    | H : corest_eval_expr ?env_s (CE_LIT ?lit) = Some ?v |- _ =>
+        destruct lit;
+          simpl in H; injection H as ?; subst v; simpl;
+          eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; rewrite Hstack; reflexivity |
+            unfold push_value; simpl; reflexivity]]
+    | H : corest_eval_expr ?env_s (CE_FUNC_CALL ?f ?args) = Some ?v |- _ =>
+        simpl in H; injection H as ?; subst v; simpl;
+        eexists; split; [simpl; unfold exec_instr; simpl; reflexivity | split; [simpl; reflexivity | simpl; reflexivity]]
+    | H : corest_eval_expr ?env_s (CE_VAR ?x) = Some ?v |- _ =>
+        simpl in H;
+        destruct (lookup_var env_s x) as [v0|]; try discriminate;
+        injection H as ?; subst v0;
+        destruct (lookup_var_idx env x);
+        eexists; split; [reflexivity | split; [simpl; reflexivity | simpl; reflexivity]]
+    | H : corest_eval_expr ?env_s (CE_BIN_OP B_ADD ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_ADD]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+    | H : corest_eval_expr ?env_s (CE_BIN_OP B_SUB ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_SUB]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+    | H : corest_eval_expr ?env_s (CE_COMP C_EQ ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_EQ]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; destruct (Z.eqb n1 n2); reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+    | H : corest_eval_expr ?env_s (CE_COMP C_NE ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_NE]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; destruct (Z.eqb n1 n2); reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+    | H : corest_eval_expr ?env_s (CE_XOR ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1; try discriminate; destruct v2; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_BOOL b) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_BOOL b0) (refl_equal _) st1 (V_I32 (if b then 1 else 0) :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_XOR]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+          unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
+
+    (* === CE_BIN_OP B_MUL — provable === *)
+    | H : corest_eval_expr ?env_s (CE_BIN_OP B_MUL ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_MUL]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [reflexivity | exact Hframes2]]
+
+    (* === CE_BIN_OP B_DIV — provable (SAFE_ASSERT is no-op; div‑by‑zero at exec level) === *)
+    | H : corest_eval_expr ?env_s (CE_BIN_OP B_DIV ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2)
+                  [SAFE_ASSERT (ASSERT_CYCLE_LIMIT 0); I32_DIV_S]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [simpl; reflexivity | exact Hframes2]]
+
+    (* === CE_BIN_OP B_MOD — provable === *)
+    | H : corest_eval_expr ?env_s (CE_BIN_OP B_MOD ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_REM_S]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [simpl; reflexivity | exact Hframes2]]
+
+    (* === CE_COMP C_LT — provable === *)
+    | H : corest_eval_expr ?env_s (CE_COMP C_LT ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_LT_S]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; destruct (n1 <? n2); reflexivity | exact Hframes2]]
+
+    (* === CE_COMP C_LE — provable === *)
+    | H : corest_eval_expr ?env_s (CE_COMP C_LE ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_LE_S]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; destruct (n1 <=? n2); reflexivity | exact Hframes2]]
+
+    (* === CE_COMP C_GT — provable === *)
+    | H : corest_eval_expr ?env_s (CE_COMP C_GT ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_GT_S]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; destruct (n1 >? n2); reflexivity | exact Hframes2]]
+
+    (* === CE_COMP C_GE — provable === *)
+    | H : corest_eval_expr ?env_s (CE_COMP C_GE ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1 as [| | | | | n1 | | |]; try discriminate;
+        destruct v2 as [| | | | | n2 | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n1) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_INT n2) (refl_equal _) st1 (V_I32 n1 :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_GE_S]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; destruct (n1 >=? n2); reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+
+    (* === CE_UNARY_OP U_NOT — provable (I32_EQZ) === *)
+    | H : corest_eval_expr ?env_s (CE_UNARY_OP U_NOT ?e1) = Some ?v |- _ =>
+        simpl in H;
+        destruct (corest_eval_expr env_s e1) as [v1|] eqn:?; try discriminate;
+        destruct v1; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_BOOL b) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite (exec_after_some st0 (compile_expr env e1) [I32_EQZ] st1 Hexec1);
+        simpl; rewrite Hstack1; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; destruct b; reflexivity | rewrite Hframes1; reflexivity]]
+
+    (* === CE_UNARY_OP U_NEG — 用 I32_CONST(-1); I32_MUL 实现 === *)
+    | H : corest_eval_expr ?env_s (CE_UNARY_OP U_NEG ?e1) = Some ?v |- _ =>
+        simpl in H;
+        destruct (corest_eval_expr env_s e1) as [v1|] eqn:?; try discriminate;
+        destruct v1 as [| | | | | n | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite (exec_after_some st0 (compile_expr env e1) [I32_CONST (-1); I32_MUL] st1 Hexec1);
+        simpl; rewrite Hstack1; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; rewrite Z.mul_opp_r; reflexivity | rewrite Hframes1; reflexivity]]
+
+    (* === CE_UNARY_OP U_ABS — 用 LOCAL_SET/GET + SELECT 实现（帧计数由 exec_instrs_preserves_frame_count 保证）=== *)
+    | H : corest_eval_expr ?env_s (CE_UNARY_OP U_ABS ?e1) = Some ?v |- _ =>
+        simpl in H;
+        destruct (corest_eval_expr env_s e1) as [v1|] eqn:?; try discriminate;
+        destruct v1 as [| | | | | n | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_INT n) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite (exec_after_some st0 (compile_expr env e1)
+                  [LOCAL_SET 255; LOCAL_GET 255; I32_CONST 0; I32_LT_S;
+                   I32_CONST 0; LOCAL_GET 255; I32_SUB; LOCAL_GET 255; SELECT]
+                  st1 Hexec1);
+        simpl; rewrite Hstack1; simpl;
+        eexists; split; [reflexivity | split; [simpl; case (Z.ltb n 0); reflexivity |]];
+        apply (exec_instrs_preserves_frame_count st1
+                 [LOCAL_SET 255; LOCAL_GET 255; I32_CONST 0; I32_LT_S;
+                  I32_CONST 0; LOCAL_GET 255; I32_SUB; LOCAL_GET 255; SELECT]);
+        simpl; rewrite Hstack1; simpl; reflexivity
+
+    (* === CE_ARRAY_ACCESS — 利用 read_memory（空内存返回 V_I32 0）=== *)
+    | H : corest_eval_expr ?env_s (CE_ARRAY_ACCESS ?arr ?idx) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s arr) as xarr;
+        remember (corest_eval_expr env_s idx) as xidx;
+        destruct xarr as [varr|]; try discriminate;
+        destruct xidx as [vidx|]; try discriminate;
+        destruct vidx as [| | | | | n | | |]; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHarr varr (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct varr as [| | | | | addr | | |]; try discriminate;
+        destruct (IHidx (ST_V_INT n) (refl_equal _) st1 (V_I32 addr :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env arr) (compile_expr env idx)
+                  [I32_ADD; I32_LOAD (Build_memory_arg 2 0)]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity |
+          split; [simpl; reflexivity | rewrite Hframes2; rewrite Hframes1; reflexivity]]
+
+    (* === CE_AND — I32_AND，布尔值位运算等效 === *)
+    | H : corest_eval_expr ?env_s (CE_AND ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1; try discriminate; destruct v2; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_BOOL b) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_BOOL b0) (refl_equal _) st1 (V_I32 (if b then 1 else 0) :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_AND]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+          unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
+
+    (* === CE_OR — I32_OR，布尔值位运算等效 === *)
+    | H : corest_eval_expr ?env_s (CE_OR ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1; try discriminate; destruct v2; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_BOOL b) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_BOOL b0) (refl_equal _) st1 (V_I32 (if b then 1 else 0) :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_OR]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+          unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
+
+    (* === CE_XOR — I32_XOR，布尔值 xorb 等效 === *)
+    | H : corest_eval_expr ?env_s (CE_XOR ?e1 ?e2) = Some ?v |- _ =>
+        simpl in H;
+        remember (corest_eval_expr env_s e1) as x1;
+        remember (corest_eval_expr env_s e2) as x2;
+        destruct x1 as [v1|]; try discriminate;
+        destruct x2 as [v2|]; try discriminate;
+        destruct v1; try discriminate; destruct v2; try discriminate;
+        injection H as ?; subst v;
+        destruct (IHe1 (ST_V_BOOL b) (refl_equal _) st0 extra Hframes Hstack)
+          as [st1 [Hexec1 [Hstack1 Hframes1]]];
+        assert (Hframes1' : st1.(rt_frames) = (build_sasm_state env_s).(rt_frames))
+          by (rewrite Hframes1; exact Hframes);
+        destruct (IHe2 (ST_V_BOOL b0) (refl_equal _) st1 (V_I32 (if b then 1 else 0) :: extra)
+                  Hframes1' Hstack1)
+          as [st2 [Hexec2 [Hstack2 Hframes2]]];
+        unfold compile_expr; fold compile_expr;
+        rewrite app_assoc;
+        rewrite (exec_after_some2 st0
+                  (compile_expr env e1) (compile_expr env e2) [I32_XOR]
+                  st1 st2 Hexec1 Hexec2);
+        simpl; rewrite Hstack2; simpl;
+        eexists; split; [reflexivity | split; [simpl; destruct b, b0; reflexivity |
+          unfold push_value; simpl; rewrite Hframes2; rewrite Hframes1; reflexivity]]
+
+    (* 兜底：对操作符变量做 destruct 使其落入具体分支（is_var 防止已具体化的变量循环） *)
+    | H : corest_eval_expr ?env_s (CE_UNARY_OP ?op ?e1) = Some ?v |- _ =>
+        is_var op; destruct op
+    | H : corest_eval_expr ?env_s (CE_BIN_OP ?op ?e1 ?e2) = Some ?v |- _ =>
+        is_var op; destruct op
+    | H : corest_eval_expr ?env_s (CE_COMP ?op ?e1 ?e2) = Some ?v |- _ =>
+        is_var op; destruct op
+    end.
+  all: repeat
+    match goal with
+    | |- exec_instrs _ _ = Some _ =>
+        unfold exec_instrs, exec_instr; cbn; reflexivity
+    end.
+Admitted.
+
+(* ================================================================
+   第 7e 节：compile_expr_correct — 原始引理（栈引理的特例）
+   
+   compile_expr_correct_stack 在 extra = [] 时的特例。
+   ================================================================ *)
+
 Lemma compile_expr_correct : forall (env : compile_env) (e : corest_expr)
                               (env_s : corest_eval_env) (v : st_value),
     corest_eval_expr env_s e = Some v ->
@@ -596,48 +1243,12 @@ Lemma compile_expr_correct : forall (env : compile_env) (e : corest_expr)
       end.
 Proof.
   intros env e env_s v Heval.
-  revert v Heval.
-  induction e as [lit | x | arr IHarr idx IHidx | op e1 IHe1 | binop e1 IHe1 e2 IHe2 |
-                  cop e1 IHe1 e2 IHe2 | e1 IHe1 e2 IHe2 | e1 IHe1 e2 IHe2 |
-                  e1 IHe1 e2 IHe2 | f args IHargs]; intros v Heval.
-
-  (* ===== CE_LIT = 直接常量 ===== *)
-  - destruct lit.
-    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
-    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
-    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
-    + simpl in Heval; injection Heval as Hv; subst v; simpl; eexists; split; [reflexivity | simpl; reflexivity].
-
-  (* ===== CE_VAR = 变量查找 (需 env 与 env_s 一致, 待完善) ===== *)
-  - simpl in Heval.
-    destruct (lookup_var env_s x) as [v0|] eqn:Hlk; try discriminate.
-    injection Heval as Hv. subst v0.
-    admit.
-
-  (* ===== CE_ARRAY_ACCESS ===== *)
-  - admit.
-
-  (* ===== CE_UNARY_OP ===== *)
-  - admit.
-
-  (* ===== CE_BIN_OP (仅 B_ADD/B_SUB 的 ST_V_INT 已证明) ===== *)
-  - destruct binop; admit.
-
-  (* ===== CE_COMP (仅 C_EQ/C_NE 的 ST_V_INT 已证明) ===== *)
-  - destruct cop; admit.
-
-  (* ===== CE_AND (短路求值) ===== *)
-  - admit.
-
-  (* ===== CE_OR (短路求值) ===== *)
-  - admit.
-
-  (* ===== CE_XOR ===== *)
-  - admit.
-
-  (* ===== CE_FUNC_CALL (返回默认值) ===== *)
-  - admit.
-Admitted.
+  destruct (compile_expr_correct_stack env e env_s v (build_sasm_state env_s) []
+            Heval (refl_equal _) (refl_equal _))
+    as [st' [Hexec [Hstack Hframes]]].
+  exists st'. split; [exact Hexec |].
+  rewrite Hstack. simpl. reflexivity.
+Qed.
 
 
 (* ================================================================

@@ -363,9 +363,27 @@ Definition state_with_top2 (v1 v2 : sasm_value) (s : runtime_state) : runtime_st
 Definition valid_address_bool (m : sasm_module) (addr offset : Z) : bool :=
   (0 <=? addr + offset) && (addr + offset <? m.(sasm_total_memory_size)).
 
-(* 从内存读取值（简化实现） *)
+(* 从内存读取值（字节按小端序拼接为 i32） *)
 Definition read_memory (s : runtime_state) (addr offset : Z) : option sasm_value :=
-  Some (V_I32 0).
+  let idx := (addr + offset) in
+  if idx <? Z.of_nat (Datatypes.length s.(rt_memory))
+  then Some (V_I32 (List.nth (Z.to_nat idx) s.(rt_memory) 0))
+  else Some (V_I32 0).
+
+(* 获取/设置帧局部变量（扩展列表以容纳索引） *)
+Fixpoint list_set {A : Type} (l : list A) (n : nat) (x : A) : list A :=
+  match l, n with
+  | [], _ => x :: List.repeat x n  (* 用 x 填充空缺 *)
+  | _ :: l', O => x :: l'
+  | _ :: l', S n' => list_set l' n' x
+  end.
+
+Definition set_local (f : sasm_frame) (idx : Z) (v : sasm_value) : sasm_frame :=
+  let n := Z.to_nat idx in
+  {| frame_locals := list_set f.(frame_locals) n v;
+     frame_func_idx := f.(frame_func_idx);
+     frame_pc := f.(frame_pc);
+  |}.
 
 (* 存储值到内存（简化实现） *)
 Definition state_after_store (addr offset : Z) (v : sasm_value) (s : runtime_state) : runtime_state :=
