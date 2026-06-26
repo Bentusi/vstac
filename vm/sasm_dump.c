@@ -2,7 +2,7 @@
  * vm/sasm_dump.c
  * SafeASM 二进制可视化打印工具
  * 
- * 功能: 读取 .sasm 文件并打印人类可读的内容
+ * 功能: 读取 .sasm 文件并打印可读的内容
  * 用法: ./sasm_dump <file.sasm>
  * 
  * 输出:

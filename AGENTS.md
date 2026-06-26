@@ -15,7 +15,7 @@ st2wa/
 │   ├── phase2-io-rtos.prompt.md
 │   ├── phase3-hotstandby.prompt.md
 │   └── phase4-engineering.prompt.md
-├── spec/                         ← 顶层 Spec 文档（人类可读）
+├── spec/                         ← 顶层 Spec 文档（开发可读）
 │   ├── safest-spec.md
 │   ├── safeasm-spec.md
 │   └── semantics-preservation.md

@@ -13,9 +13,9 @@ VM_TEST_BIN = $(VM_TEST_DIR)/test_minimal
 SASM_DUMP_SRC = vm/sasm_dump.c
 SASM_DUMP_BIN = vm/sasm_dump
 
-.PHONY: all vm-test sasm-dump clean
+.PHONY: all coq vm-test sasm-dump clean
 
-all: vm-test sasm-dump
+all: coq vm-test sasm-dump
 
 # ================================================================
 # VM 测试 (C)
@@ -37,12 +37,29 @@ $(SASM_DUMP_BIN): $(SASM_DUMP_SRC)
 	$(CC) $(CFLAGS) -o $@ $<
 
 # ================================================================
-# Coq 编译器 (需要 dune + coq)
+# Coq/Rocq 编译器
 # ================================================================
 
-# 在 Phase 1 实现后启用:
-# coq-build:
-# 	cd vstac && dune build
+VSTAC_DIR = vstac
+ROQC = coqc
+ROQCFLAGS = -Q spec vstac_spec -Q src vstac_src
+
+# Spec files (compile in order due to dependencies)
+SPEC_FILES = spec/safeasm.v spec/safest.v spec/compiler_correctness.v
+
+# Src files (depend on spec files)
+SRC_FILES = src/encoder.v src/lexer.v src/parser.v src/desugar.v src/typechecker.v src/codegen.v
+
+coq:
+	@echo "  [ROQC] spec files..."
+	cd $(VSTAC_DIR) && for f in $(SPEC_FILES); do \
+		echo "    $$f"; $(ROQC) $(ROQCFLAGS) $$f || exit 1; \
+	done
+	@echo "  [ROQC] src files..."
+	cd $(VSTAC_DIR) && for f in $(SRC_FILES); do \
+		echo "    $$f"; $(ROQC) $(ROQCFLAGS) $$f || exit 1; \
+	done
+	@echo "  [ROQC] All files compiled successfully"
 
 # ================================================================
 # 清理
@@ -51,3 +68,6 @@ $(SASM_DUMP_BIN): $(SASM_DUMP_SRC)
 clean:
 	rm -f $(VM_TEST_BIN)
 	find . -name '*.o' -delete
+
+	rm -f vstac/spec/*.vo vstac/spec/*.glob vstac/src/*.vo vstac/src/*.glob vstac/*.vo vstac/*.glob
+	cd vstac && dune clean 2>/dev/null || true
