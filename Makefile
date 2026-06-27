@@ -124,7 +124,7 @@ rtthread: $(VM_CORE_LIB) $(VM_IO_LIB)
 # ================================================================
 
 VSTAC_DIR = vstac
-ROQC = coqc
+ROQC = rocq c
 ROQCFLAGS = -Q spec vstac_spec -Q src vstac_src
 
 # Spec files (compile in order due to dependencies)

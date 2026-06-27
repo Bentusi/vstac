@@ -13,6 +13,10 @@
 #include <string.h>
 #include <assert.h>
 #include "../../vm/vm.h"
+#include "../../rtos/abstract.h"
+
+/* 为 I/O 映射层提供 g_vm_interface 桩（测试中不使用 I/O） */
+VM_Interface g_vm_interface = { 0 };
 
 /* 链接 loader.c 和 safeasm_interp.c */
 #include "../../vm/loader.c"

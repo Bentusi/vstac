@@ -9,6 +9,7 @@ Require Import vstac_spec.safeasm.
 Import ListNotations.
 
 Definition encode_u8 (v : Z) : list Z := [Z.land v 255].
+Definition encode_u16 (v : Z) : list Z := [Z.land v 255; Z.land (Z.shiftr v 8) 255].
 Definition encode_u32 (v : Z) : list Z := [Z.land v 255; Z.land (Z.shiftr v 8) 255; Z.land (Z.shiftr v 16) 255; Z.land (Z.shiftr v 24) 255].
 Definition encode_s32 (v : Z) : list Z := encode_u32 (Z.land v 4294967295).
 Definition encode_u64 (v : Z) : list Z := [Z.land v 255; Z.land (Z.shiftr v 8) 255; Z.land (Z.shiftr v 16) 255; Z.land (Z.shiftr v 24) 255; Z.land (Z.shiftr v 32) 255; Z.land (Z.shiftr v 40) 255; Z.land (Z.shiftr v 48) 255; Z.land (Z.shiftr v 56) 255].
@@ -62,4 +63,6 @@ Definition encode_sasm (m : sasm_module) : list Z :=
 
 Theorem encode_starts_with_magic : forall (m : sasm_module),
     exists rest, encode_sasm m = [0x53; 0x41; 0x53; 0x4D] ++ rest.
-Proof. intros m. unfold encode_sasm. simpl. eexists. reflexivity. Qed.
+Proof.
+  intros m. unfold encode_sasm. simpl. eexists. reflexivity.
+Qed.

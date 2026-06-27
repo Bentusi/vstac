@@ -642,18 +642,29 @@ Qed.
    第 9 部分：Progress 定理
    
    良类型非终态程序至少可以执行一步。
+   注意：当前 version 使用简化的 step_st（仅 St_assign 改变状态，
+   其他由 St_skip 覆盖），因此 Progress 总是成立。
+   Phase 1 中将随 step_st 细化而完善此证明。
    ================================================================ *)
 
-(* 判断状态是否为终态 *)
-Definition terminal_state (s : st_state) : Prop :=
-  False.  (* 具体定义取决于操作语义的完整实现 *)
+(* terminal_state 定义在 compiler_correctness.v 中 *)
+(*   terminal_state s := s.(st_call_stack) = nil *)
+
+Lemma progress_assign : forall (p : st_program) (s : st_state) (x : ident) (v : st_value),
+    exists s', step_st p (update_var s x v) s'.
+Proof.
+  intros. eexists; apply St_skip.
+Qed.
 
 Theorem progress : forall (p : st_program) (s : st_state),
     well_typed_program p ->
     ~ terminal_state s ->
     exists s', step_st p s s'.
 Proof.
-  intros p s Hwt Hnoterm. exists s. apply St_skip.
+  intros p s Hwt Hnoterm.
+  (* 当前简化：所有状态（包括非终态）都可以通过 St_skip 执行一步。
+     在 Phase 1 细化的 step_st 中，此证明需对语句结构做归纳。 *)
+  exists s. apply St_skip.
 Qed.
 
 
@@ -661,6 +672,8 @@ Qed.
    第 10 部分：Preservation 定理
    
    ST 程序执行一步后，类型保持。
+   当前为简化版本——well_typed_program 是纯程序属性，不依赖运行时状态，
+   因此任何一步执行后都保持。Phase 1 中将引入运行时类型一致性。
    ================================================================ *)
 
 Theorem preservation : forall (p : st_program) (s s' : st_state),
