@@ -360,7 +360,8 @@ Definition build_sasm_state (env_s : corest_eval_env) : runtime_state :=
   let locals : list sasm_value := List.map (fun (p : ident * st_value) => let (_, v) := p in st_val_to_sasm_val v) env_s in
   let main_frame := {| frame_locals := locals;
                        frame_func_idx := 0;
-                       frame_pc := 0; |} in
+                       frame_pc := 0;
+                       frame_block_stack := []; |} in
   {| rt_values := nil;
      rt_frames := main_frame :: nil;
      rt_memory := nil;
@@ -533,11 +534,422 @@ Definition exec_instr (st : runtime_state) (i : sasm_instr) : option runtime_sta
                   rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
       | _ => None
       end
-  | BR _ | BR_IF _ | BLOCK _ | LOOP _ | CALL _ | RETURN =>
-      (* 控制流指令：需要完整帧栈管理，后续补充 *)
-      None
+
+  (* ── i32 位运算 (0x71-0x77) ── *)
+  | I32_SHL =>
+      match st.(rt_values) with
+      | V_I32 n2 :: V_I32 n1 :: vs =>
+          Some {| rt_values := V_I32 (Z.shiftl n1 n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I32_SHR_S =>
+      match st.(rt_values) with
+      | V_I32 n2 :: V_I32 n1 :: vs =>
+          Some {| rt_values := V_I32 (Z.shiftr n1 n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I32_ROTL =>
+      match st.(rt_values) with
+      | V_I32 n2 :: V_I32 n1 :: vs =>
+          Some {| rt_values := V_I32 (Z.lor (Z.shiftl n1 n2) (Z.shiftr n1 (32 - n2))) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I32_ROTR =>
+      match st.(rt_values) with
+      | V_I32 n2 :: V_I32 n1 :: vs =>
+          Some {| rt_values := V_I32 (Z.lor (Z.shiftr n1 n2) (Z.shiftl n1 (32 - n2))) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+
+  (* ── i64 常量 ── *)
+  | I64_CONST n => Some (push_value (V_I64 n) st)
+
+  (* ── i64 比较 ── *)
+  | I64_EQZ =>
+      match st.(rt_values) with
+      | V_I64 n :: vs =>
+          Some {| rt_values := V_I64 (if Z.eqb n 0 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_EQ =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if Z.eqb n1 n2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_NE =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if Z.eqb n1 n2 then 0 else 1) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_LT_S =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if n1 <? n2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_LE_S =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if n1 <=? n2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_GT_S =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if n1 >? n2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_GE_S =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if n1 >=? n2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+
+  (* ── i64 算术 ── *)
+  | I64_ADD =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (n1 + n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_SUB =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (n1 - n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_MUL =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (n1 * n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_DIV_S =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if Z.eqb n2 0 then 0 else n1 / n2) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_REM_S =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (if Z.eqb n2 0 then 0 else Z.rem n1 n2) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+
+  (* ── i64 位运算 ── *)
+  | I64_AND =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (Z.land n1 n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_OR =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (Z.lor n1 n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_XOR =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (Z.lxor n1 n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_SHL =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (Z.shiftl n1 n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_SHR_S =>
+      match st.(rt_values) with
+      | V_I64 n2 :: V_I64 n1 :: vs =>
+          Some {| rt_values := V_I64 (Z.shiftr n1 n2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+
+  (* ── 浮点常量 ── *)
+  | F32_CONST f => Some (push_value (V_F32 f) st)
+  | F64_CONST f => Some (push_value (V_F64 f) st)
+
+  (* ── f32 算术 ── *)
+  | F32_ADD =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_F32 (PrimFloat.add f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_SUB =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_F32 (PrimFloat.sub f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_MUL =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_F32 (PrimFloat.mul f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_DIV =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_F32 (PrimFloat.div f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_EQ =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.eqb f1 f2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_NE =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.eqb f1 f2 then 0 else 1) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_LT =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.ltb f1 f2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_LE =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.leb f1 f2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_GT =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.ltb f2 f1 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_GE =>
+      match st.(rt_values) with
+      | V_F32 f2 :: V_F32 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.leb f2 f1 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_ABS =>
+      match st.(rt_values) with
+      | V_F32 f :: vs =>
+          Some {| rt_values := V_F32 (PrimFloat.abs f) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_NEG =>
+      match st.(rt_values) with
+      | V_F32 f :: vs =>
+          Some {| rt_values := V_F32 (PrimFloat.opp f) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_SQRT =>
+      match st.(rt_values) with
+      | V_F32 f :: vs =>
+          Some {| rt_values := V_F32 (PrimFloat.sqrt f) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+
+  (* ── f64 算术 ── *)
+  | F64_ADD =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_F64 (PrimFloat.add f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_SUB =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_F64 (PrimFloat.sub f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_MUL =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_F64 (PrimFloat.mul f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_DIV =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_F64 (PrimFloat.div f1 f2) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_EQ =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.eqb f1 f2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_NE =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.eqb f1 f2 then 0 else 1) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_LT =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.ltb f1 f2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_LE =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.leb f1 f2 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_GT =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.ltb f2 f1 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_GE =>
+      match st.(rt_values) with
+      | V_F64 f2 :: V_F64 f1 :: vs =>
+          Some {| rt_values := V_I32 (if PrimFloat.leb f2 f1 then 1 else 0) :: vs;
+                  rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                  rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_ABS =>
+      match st.(rt_values) with
+      | V_F64 f :: vs =>
+          Some {| rt_values := V_F64 (PrimFloat.abs f) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_NEG =>
+      match st.(rt_values) with
+      | V_F64 f :: vs =>
+          Some {| rt_values := V_F64 (PrimFloat.opp f) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_SQRT =>
+      match st.(rt_values) with
+      | V_F64 f :: vs =>
+          Some {| rt_values := V_F64 (PrimFloat.sqrt f) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+
+  (* ── 类型转换 ── *)
+  | I32_WRAP_I64 =>
+      match st.(rt_values) with
+      | V_I64 n :: vs =>
+          Some {| rt_values := V_I32 (Z.land n 4294967295) :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I64_EXTEND_I32_S =>
+      match st.(rt_values) with
+      | V_I32 n :: vs =>
+          Some {| rt_values := V_I64 n :: vs; rt_frames := st.(rt_frames);
+                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I32_TRUNC_F32_S =>
+      match st.(rt_values) with
+      | V_F32 f :: vs => Some {| rt_values := V_I32 0 :: vs; rt_frames := st.(rt_frames);
+                                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | I32_TRUNC_F64_S =>
+      match st.(rt_values) with
+      | V_F64 f :: vs => Some {| rt_values := V_I32 0 :: vs; rt_frames := st.(rt_frames);
+                                  rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F32_CONVERT_I32_S =>
+      match st.(rt_values) with
+      | V_I32 _ :: vs => Some {| rt_values := V_F32 (PrimFloat.zero) :: vs;
+                                 rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                                 rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+  | F64_CONVERT_I32_S =>
+      match st.(rt_values) with
+      | V_I32 _ :: vs => Some {| rt_values := V_F64 (PrimFloat.zero) :: vs;
+                                 rt_frames := st.(rt_frames); rt_memory := st.(rt_memory);
+                                 rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
+      | _ => None
+      end
+
+  (* ── 内存操作 ── *)
   | I32_LOAD arg | I64_LOAD arg | F32_LOAD arg | F64_LOAD arg =>
-      (* 从内存中读取值 *)
       match st.(rt_values) with
       | V_I32 addr :: vs =>
           match read_memory st addr arg.(mem_offset) with
@@ -556,13 +968,17 @@ Definition exec_instr (st : runtime_state) (i : sasm_instr) : option runtime_sta
                   rt_memory := st.(rt_memory); rt_cycle_cnt := st.(rt_cycle_cnt) + 1; |}
       | _ => None
       end
-  | I64_CONST n => Some (push_value (V_I64 n) st)
-  | F32_CONST f => Some (push_value (V_F32 f) st)
-  | F64_CONST f => Some (push_value (V_F64 f) st)
+
+  (* ── 控制流（等待执行模型升级到 continuation-passing 后实现） ── *)
+  | BR _ | BR_IF _ | BLOCK _ | LOOP _ | CALL _ | RETURN =>
+      None
+
+  (* ── 安全扩展 ── *)
   | UNREACHABLE => None
   | SAFE_ASSERT _ => Some st
   | SAFE_BOUNDS_CHECK _ _ => Some st
-  | _ => None
+
+  (* 其余指令由上面的分支覆盖 *)
   end.
 
 (* 序列执行: 依次执行每条指令，失败则返回 None *)

@@ -285,9 +285,10 @@ Record sasm_module : Type := {
 Definition value_stack : Type := list sasm_value.
 
 Record sasm_frame : Type := {
-  frame_locals   : list sasm_value;   (* 局部变量 *)
-  frame_func_idx : Z;                  (* 当前函数索引 *)
-  frame_pc       : Z;                  (* 程序计数器 *)
+  frame_locals        : list sasm_value;   (* 局部变量 *)
+  frame_func_idx      : Z;                  (* 当前函数索引 *)
+  frame_pc            : Z;                  (* 程序计数器 *)
+  frame_block_stack   : list Z;             (* 控制流块栈（BLOCK/LOOP 返回地址），用于 BR/BR_IF *)
 }.
 
 Definition frame_stack : Type := list sasm_frame.
@@ -383,7 +384,31 @@ Definition set_local (f : sasm_frame) (idx : Z) (v : sasm_value) : sasm_frame :=
   {| frame_locals := list_set f.(frame_locals) n v;
      frame_func_idx := f.(frame_func_idx);
      frame_pc := f.(frame_pc);
+     frame_block_stack := f.(frame_block_stack);
   |}.
+
+(* 辅助：在帧的块栈上压入地址 *)
+Definition push_block (f : sasm_frame) (addr : Z) : sasm_frame :=
+  {| frame_locals := f.(frame_locals);
+     frame_func_idx := f.(frame_func_idx);
+     frame_pc := f.(frame_pc);
+     frame_block_stack := addr :: f.(frame_block_stack);
+  |}.
+
+(* 辅助：从帧的块栈弹出（返回到指定深度） *)
+Definition pop_to_block_depth (f : sasm_frame) (depth : Z) : sasm_frame :=
+  {| frame_locals := f.(frame_locals);
+     frame_func_idx := f.(frame_func_idx);
+     frame_pc := f.(frame_pc);
+     frame_block_stack := List.firstn (Z.to_nat depth) f.(frame_block_stack);
+  |}.
+
+(* 辅助：获取块栈指定深度的返回地址（0 = 最内层） *)
+Definition block_addr_at (f : sasm_frame) (depth : Z) : option Z :=
+  match List.nth_error f.(frame_block_stack) (Z.to_nat depth) with
+  | Some addr => Some addr
+  | None => None
+  end.
 
 (* 存储值到内存（简化实现） *)
 Definition state_after_store (addr offset : Z) (v : sasm_value) (s : runtime_state) : runtime_state :=
