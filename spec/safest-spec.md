@@ -507,45 +507,127 @@ QUALITY        ❌        ✅③   ✅
 
 ### 5.3 类型检查规则（语义）
 
-```
-Γ ⊢ literal : literal_type(literal)       (T_Literal)
+类型检查规则采用**自然演绎 (Natural Deduction)** 格式：
 
-Γ(x) = T                                (T_Var)
+```
+  前提₁    前提₂    ...    前提ₙ
+  ──────────────────────────────  (规则名)
+        结  论
+```
+
+其中 `Γ` 是类型环境（变量名 → 类型），`Γ ⊢ e : T` 表示"在环境 Γ 下，表达式 e 的类型为 T"。
+
+```
+─────────────────────────────  (T_Literal)
+Γ ⊢ literal : literal_type(literal)
+
+
+Γ(x) = T
+─────────────────────────────  (T_Var)
 Γ ⊢ x : T
 
-Γ ⊢ e1 : T1    Γ ⊢ e2 : T2    promote(T1,T2) = T3
-T3 支持 + 操作                                (T_Add)
-Γ ⊢ e1 + e2 : T3
 
-Γ ⊢ e : T      T 支持 NOT 操作               (T_Not)
+Γ ⊢ e₁ : T₁    Γ ⊢ e₂ : T₂    promote(T₁, T₂) = T₃    T₃ ∈ {INT, DINT, LINT, REAL, LREAL}
+─────────────────────────────────────────────────────────────────────────────────────────  (T_Add)
+Γ ⊢ e₁ + e₂ : T₃
+
+
+Γ ⊢ e : T    T ∈ {BOOL, SINT, INT, DINT, LINT}
+───────────────────────────────────────────────  (T_Neg)
+Γ ⊢ -e : T
+
+
+Γ ⊢ e : T    T ∈ {INT, DINT, LINT, REAL, LREAL}
+───────────────────────────────────────────────  (T_ABS)
+Γ ⊢ ABS e : T
+
+
+Γ ⊢ e : T    T = BOOL
+─────────────────────  (T_Not)
 Γ ⊢ NOT e : T
 
-Γ ⊢ e1 : T1    Γ ⊢ e2 : T2
-comparable(T1, T2)                          (T_Compare)
-Γ ⊢ e1 = e2 : BOOL
 
-Γ ⊢ e : BOOL                                (T_If)
-Γ ⊢ IF e THEN ... : OK
+Γ ⊢ e₁ : T₁    Γ ⊢ e₂ : T₂    comparable(T₁, T₂)
+─────────────────────────────────────────────────  (T_Compare)
+Γ ⊢ e₁ = e₂ : BOOL
 
-Γ ⊢ e1 : INT     Γ ⊢ v : INT
-Γ ⊢ e1 TO v : INT                          (T_For)
+
+Γ ⊢ e : BOOL
+─────────────────────  (T_If)
+Γ ⊢ IF e ... : OK
+
 
 Γ ⊢ e : INT
-CASE 每个分支的选择值类型与 e 兼容             (T_Case)
+─────────────────────  (T_Case)
 Γ ⊢ CASE e ... : OK
 
-Γ ⊢ e : BOOL                              (T_While)
+
+Γ ⊢ e₁ : INT    Γ ⊢ e₂ : INT
+─────────────────────────────  (T_For)
+Γ ⊢ e₁ TO e₂ : INT
+
+
+Γ ⊢ e : BOOL
+─────────────────────  (T_While)
 Γ ⊢ WHILE e ... : OK
 
-Γ ⊢ e : BOOL                              (T_Repeat)
+
+Γ ⊢ e : BOOL
+─────────────────────  (T_Repeat)
 Γ ⊢ REPEAT ... UNTIL e : OK
 
-Γ ⊢ x : T    Γ ⊢ e : T'    T' → T 可隐式转换  (T_Assign)
+
+Γ ⊢ x : T    Γ ⊢ e : T'    T' → T 可隐式转换
+─────────────────────────────────────────────  (T_Assign)
 Γ ⊢ x := e : OK
 
-Γ ⊢ inst : FB_Type
-Γ ⊢ params 类型匹配 FB 的 VAR_INPUT/VAR_IN_OUT    (T_FB_Call)
+
+Γ ⊢ inst : FB_Type    params 类型匹配 FB 的 VAR_INPUT/VAR_IN_OUT
+─────────────────────────────────────────────────────────────────  (T_FB_Call)
 Γ ⊢ inst(params) : OK
+
+
+--- v1.1 新增：Q 类型与质量检查规则 ---
+
+
+Γ ⊢ e : T    T 是普通类型
+─────────────────────────────  (T_Q_Inject)  T → QT，质量隐式 GOOD
+Γ ⊢ e : Q(T)
+
+
+Γ ⊢ e : Q(T)
+─────────────────────────────  (T_Q_Extract)  QT → T，质量丢弃（警告）
+Γ ⊢ Q_VALUE(e) : T
+
+
+Γ ⊢ e : Q(T₁)    promote(T₁, T₂) = T₃
+─────────────────────────────────────  (T_Q_Promote)  QT 间提升，质量透传
+Γ ⊢ e : Q(T₃)
+
+
+Γ ⊢ e : Q(T)
+─────────────────────────────  (T_Q_Status)
+Γ ⊢ Q_STATUS(e) : QUALITY
+
+
+Γ ⊢ v : T    Γ ⊢ q : QUALITY
+─────────────────────────────  (T_Q_With)
+Γ ⊢ Q_WITH(v, q) : Q(T)
+
+
+Γ ⊢ e : Q(T)
+─────────────────────────────  (T_Q_Good)
+Γ ⊢ Q_GOOD(e) : BOOL
+
+
+Γ ⊢ e : Q(T)
+─────────────────────────────  (T_Q_Bad)
+Γ ⊢ Q_BAD(e) : BOOL
+
+
+Γ ⊢ e : QUALITY
+─────────────────────  (T_Quality_Literal)  GOOD/BAD/UNCERTAIN/NOT_CONNECTED
+Γ ⊢ e : QUALITY
 ```
 
 ---
@@ -560,7 +642,7 @@ SafeST 的操作语义采用**小步语义 (small-step semantics)** 定义，与
 ST 运行时状态 σ = (vars, quality, pou_idx, stmt_idx, call_stack, cycle_cnt)
 其中:
   vars:       list (ident × st_value)    所有变量的当前值
-  quality:    list (ident × quality)     所有变量的质量码（v1.1 新增）
+  quality:    list (ident × quality)     质量位置映射（v1.1 新增）
   pou_idx:    Z                          当前执行的 POU 索引
   stmt_idx:   Z                          当前语句索引
   call_stack: list Z                     调用栈（历史 POU 索引）
