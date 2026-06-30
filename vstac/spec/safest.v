@@ -184,8 +184,8 @@ Inductive st_expr : Type :=
   | E_UNARY_OP : unary_op -> st_expr -> st_expr               (* 一元运算 *)
   | E_BIN_OP : binary_op -> st_expr -> st_expr -> st_expr       (* 二元运算 *)
   | E_COMP : compare_op -> st_expr -> st_expr -> st_expr        (* 比较运算 *)
-  | E_AND : st_expr -> st_expr -> st_expr                      (* 逻辑 AND（短路求值） *)
-  | E_OR : st_expr -> st_expr -> st_expr                       (* 逻辑 OR（短路求值） *)
+  | E_AND : st_expr -> st_expr -> st_expr                      (* 逻辑 AND（逻辑求值） *)
+  | E_OR : st_expr -> st_expr -> st_expr                       (* 逻辑 OR（逻辑求值） *)
   | E_XOR : st_expr -> st_expr -> st_expr                      (* 逻辑 XOR *)
   | E_FUNC_CALL : ident -> list st_expr -> st_expr             (* 函数调用 *)
 .

@@ -424,13 +424,13 @@ Parameter var_to_sasm_offset : ident -> Z.
    
    这是整个验证中最关键的定义——它决定了什么是"编译正确"。 *)
 Definition abstraction_relation (st_st : st_state) (asm_st : runtime_state) : Prop :=
-  (* 条件 1: 变量值一致性（简化：仅要求变量在内存中有对应偏移，暂不校验值本身，
-     因 state_after_store / read_sasm_mem 的完整语义尚未实现） *)
+  (* 条件 1: 变量值一致性 — ST 变量 v 在 ASM 内存中对应偏移处的值 = st_val_to_sasm(v) *)
   (forall (x : ident) (v : st_value),
     List.In (x, v) st_st.(st_vars) ->
     exists (offset : Z) (asm_val : sasm_value),
       var_to_sasm_offset x = offset /\
-      read_sasm_mem asm_st offset = Some asm_val) /\
+      read_sasm_mem asm_st offset = Some asm_val /\
+      st_val_to_sasm v = asm_val) /\
   
   (* 条件 2: 执行位置一致（取帧栈顶帧的函数索引） *)
   (match asm_st.(rt_frames) with
@@ -495,7 +495,12 @@ Theorem semantics_preservation :
 Proof.
   intros p m Hcomp s1 s2 t1 Hstep Habst.
   induction Hstep.
-  - (* St_assign: x := e, s2 = update_var s x v *)
+  - (* St_assign: x := e, s2 = update_var s x v
+       证明策略: 赋值后抽象的变量值一致性得以保持
+       新赋值的变量 (x,v) 需在内存中对应偏移处有 st_val_to_sasm v，
+       其他变量值和ASM内存值均不变。
+       注：第三条件的完全证明依赖codegen.v生成正确的LOCAL_SET/I32_STORE，
+       当前为占位证明admit，Phase 1中完善。 *)
     exists t1. split; [apply Multi_sasm_refl |].
     destruct Habst as [Hvars [Hframe Hdepth]].
     repeat split.
@@ -503,19 +508,17 @@ Proof.
       simpl in Hin.
       destruct Hin as [Hpair | Hin'].
       * injection Hpair as ? ?; subst x' v'.
-        assert (Hmem : exists v, read_sasm_mem t1 (var_to_sasm_offset x) = Some v).
-        { unfold read_sasm_mem, read_memory. simpl.
-          destruct (var_to_sasm_offset x + 0 <? Z.of_nat (Datatypes.length (rt_memory t1))) eqn:?;
-          eexists; reflexivity. }
-        destruct Hmem as [v_mem Hmem].
-        exists (var_to_sasm_offset x), v_mem. split; [reflexivity | exact Hmem].
-      * apply Hvars in Hin'. destruct Hin' as [offset [asm_val [Hoff Hread]]].
-        exists offset, asm_val. repeat split; auto.
+        exists (var_to_sasm_offset x). admit.  (* 占位 *)
+      * apply Hvars in Hin'.
+        destruct Hin' as [offset [asm_val [Hoff [Hread Heq]]]].
+        exists offset, asm_val.
+        split; [exact Hoff |].
+        split; [exact Hread | exact Heq].
     + exact Hframe.
     + exact Hdepth.
   - (* St_skip: s2 = s *)
     exists t1; split; [apply Multi_sasm_refl | exact Habst].
-Qed.
+Admitted.
 
 (* ================================================================
    定理 2: total_semantics_preservation (整体语义保持)

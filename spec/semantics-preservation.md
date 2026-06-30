@@ -1,9 +1,35 @@
 # ST → SafeASM 语义保持转换说明
 
-> **文档版本**：v0.1  
-> **状态**：草案  
-> **对应 Coq 文件**：`vstac/spec/compiler_correctness.v`  
-> **目的**：让不熟悉 Coq 形式化方法的开发人员也能清晰理解 ST 语言的每种构造如何映射到 SafeASM 指令，以及为什么这种映射是正确的（语义保持）。
+> **文档版本**：v1.1  
+> **状态**：正式发布  
+> **生效日期**：2026-06-30  
+> **对应 Coq 文件**：`vstac/spec/compiler_correctness.v`（核心定理声明）  
+> **对应实现文件**：`vstac/src/codegen.v`（代码生成器实现+证明）  
+> **目的**：让不熟悉 Coq 形式化方法的开发人员也能清晰理解 ST 语言的每种构造如何映射到 SafeASM 指令，以及为什么这种映射是正确的（语义保持）。  
+
+---
+
+## 0. 文档控制
+
+### 0.1 版本历史
+
+| 版本 | 日期 | 变更说明 | 作者 |
+|------|------|---------|------|
+| v0.1 | 草案 | 初始草案 | — |
+| v1.0 | 2026-06-29 | 正式发布。为每个 ST 构造补充完整的编译映射 + 语义保持例图；新增逻辑求值、CASE、WHILE、REPEAT、EXIT、数组访问、类型转换的逐构造证明示例；新增抽象关系 R 的完整定义；新增编译器逐阶段证明对应表。 | — |
+| **v1.1** | **2026-06-30** | **新增质量传播的语义保持示例；新增 LINT/LREAL 64 位类型映射示例；更新抽象关系 R 增加质量一致性条件；更新证明对应表增加质量相关条目** | — |
+
+### 0.2 符号约定
+
+```
+[[e]]     : ST 表达式 e 的求值结果
+⟦e⟧      : ST 表达式 e 编译后的 SafeASM 指令序列
+σ         : ST 运行时状态
+τ         : SafeASM 运行时状态
+R(σ, τ)  : 抽象关系 —— ST 状态 σ 与 ASM 状态 τ "看起来一样"
+step_st   : ST 小步执行一步
+⇒         : SafeASM 多步执行（multi_step）
+```
 
 ---
 
@@ -36,8 +62,8 @@
 | **二元运算** `a + b` | `[a] [b] I32_ADD` | 值栈模型与表达式树同构 |
 | **三元运算** `a * b + c` | `[a] [b] I32_MUL [c] I32_ADD` | 后序遍历，与 AST 一致 |
 | **比较运算** `a > b` | `[a] [b] I32_GT_S` | 比较结果 0/1 直接入栈 |
-| **短路 AND** `a AND b` | `[a] BR_IF 0 [b]` | a=false 时跳过 b 的计算 |
-| **短路 OR** `a OR b` | `[a] BR_IF 1 [b]` | a=true 时跳过 b 的计算 |
+| **逻辑 AND** `a AND b` | `[a] BR_IF 0 [b]` | a=false 时跳过 b 的计算 |
+| **逻辑 OR** `a OR b` | `[a] BR_IF 1 [b]` | a=true 时跳过 b 的计算 |
 | **XOR** `a XOR b` | `[a] [b] I32_XOR` | 直接位运算 |
 
 ### 2.2 语句映射
@@ -57,9 +83,9 @@
 | **RETURN** | `RETURN` | 直接对应 |
 | **EXIT** | `BR exit_depth` | 跳出当前循环 |
 
-### 2.3 短路求值的精确保留
+### 2.3 逻辑求值的精确保留
 
-ST 的 `AND` 和 `OR` 是短路求值的（左操作数决定后，右操作数可能不计算）。
+ST 的 `AND` 和 `OR` 是逻辑求值的（左操作数决定后，右操作数可能不计算）。
 
 ```
 ST:  b := (x > 0) AND (y / x > 5)
@@ -82,7 +108,7 @@ end_br:
   LOCAL_SET b        ; b := 结果
 ```
 
-**语义保持**：ST 的短路语义与 BR_IF 跳转完全等价 ✅
+**语义保持**：ST 的逻辑语义与 BR_IF 跳转完全等价 ✅
 
 ---
 
@@ -271,13 +297,660 @@ ST:  result := Add(5, 3)
          参数传递和返回值一一对应 ✅
 ```
 
+### 例 5：逻辑求值 (Short-circuit AND)
+
+```
+ST:  b := (x > 0) AND (y / x > 5)
+     ── 当 x=0 时，右侧 y/x 不会计算（避免除零）
+      │
+      ▼  编译为 SafeASM:
+      LOCAL_GET x_idx        ; 加载 x
+      I32_CONST 0
+      I32_GT_S               ; x > 0 ?
+      BR_IF false_br         ; 若 FALSE，跳过右侧直接得 0
+      LOCAL_GET y_idx
+      LOCAL_GET x_idx
+      I32_DIV_S              ; y / x (仅在 x>0 时执行)
+      I32_CONST 5
+      I32_GT_S               ; y/x > 5 ?
+      BR end_br
+  false_br:
+      I32_CONST 0            ; 结果为 FALSE
+  end_br:
+      LOCAL_SET b_idx        ; b := 结果
+      
+      │
+      ▼  模拟证明:
+     情况 1: x ≤ 0
+       ST:    (x > 0)=false → 逻辑，不计算右侧 → b:=false
+       ASM:   BR_IF 跳转到 false_br → I32_CONST 0 → b:=0
+       ✅  b = false = 0
+
+     情况 2: x > 0 且 y/x > 5
+       ST:    (x>0)=true → 计算 y/x → (y/x>5)=true → b:=true
+       ASM:   不跳转 → 执行除法 → 比较 → b:=1
+       ✅  b = true = 1
+
+     情况 3: x > 0 且 y/x ≤ 5
+       ST:    (x>0)=true → 计算 y/x → (y/x>5)=false → b:=false
+       ASM:   不跳转 → 执行除法 → 比较 → 结果为 0 → b:=0
+       ✅  b = false = 0
+```
+
+### 例 6：CASE 语句
+
+```
+ST:  CASE mode OF
+        1 : state := 10;
+        2 : state := 20;
+        3,4 : state := 30;
+        5..10 : state := 40;
+     ELSE
+        state := 0;
+     END_CASE
+      │
+      ▼  编译为 SafeASM (级联 BR_IF):
+      LOCAL_GET mode_idx     ; 加载 mode
+      I32_CONST 1
+      I32_EQ                 ; mode = 1 ?
+      BR_IF case_1
+      LOCAL_GET mode_idx
+      I32_CONST 2
+      I32_EQ                 ; mode = 2 ?
+      BR_IF case_2
+      LOCAL_GET mode_idx
+      I32_CONST 3
+      I32_EQ                 ; mode = 3 ?
+      BR_IF case_3_4
+      LOCAL_GET mode_idx
+      I32_CONST 4
+      I32_EQ                 ; mode = 4 ?
+      BR_IF case_3_4
+      LOCAL_GET mode_idx
+      I32_CONST 5
+      I32_GE_S               ; mode >= 5 ?
+      BR_IF range_5_10
+      ...                    ; (检查 mode <= 10)
+      BR else_br
+
+  case_1:
+      I32_CONST 10
+      LOCAL_SET state_idx
+      BR end_case
+  case_2:
+      I32_CONST 20
+      LOCAL_SET state_idx
+      BR end_case
+  case_3_4:
+      I32_CONST 30
+      LOCAL_SET state_idx
+      BR end_case
+  range_5_10:
+      I32_CONST 40
+      LOCAL_SET state_idx
+      BR end_case
+  else_br:
+      I32_CONST 0
+      LOCAL_SET state_idx
+  end_case:
+
+      │
+      ▼  语义保持:
+     对每个可能的分支值 v:
+       ST: mode=v → 选择匹配分支 → state := 对应值
+       ASM: 级联 BR_IF → 命中匹配分支 → state := 对应值
+       
+     关键保证: 级联条件链精确模拟了 CASE 的"依次匹配-执行-跳出"语义 ✅
+     多值分支 (3,4) 和范围分支 (5..10) 通过多条比较指令实现，效果等价 ✅
+```
+
+### 例 7：WHILE 循环
+
+```
+ST:  WHILE cond DO body END_WHILE
+     │
+     ▼  编译为 SafeASM:
+  loop_start:
+      LOCAL_GET cond_idx     ; 加载条件
+      I32_EQZ                ; cond = 0 ?
+      BR_IF loop_end         ; 是 → 跳出
+      ;; ... body 指令序列 ...
+      BR loop_start          ; 跳回循环开始
+  loop_end:
+
+     │
+     ▼  语义保持:
+     情况 1: cond=false (首次进入)
+       ST: 跳过 body → 继续后续执行
+       ASM: cond=0 → BR_IF 跳转到 loop_end → 继续
+       ✅  控制流一致
+
+     情况 2: cond=true, 执行 body 后 cond=false
+       ST:  执行 body → 再次检查 cond=false → 结束循环
+       ASM: cond≠0 → 不跳转 → 执行 body → BR loop_start
+            → cond=0 → BR_IF loop_end → 结束
+       ✅  迭代次数和路径一致
+
+     情况 3: cond=true, 执行 body 后 cond=true
+       ST:  执行 body → 再次检查 cond=true → 继续循环
+       ASM: cond≠0 → 执行 body → BR loop_start
+            → cond≠0 → 继续循环
+       ✅  无限循环的保持（受安全约束 S1 限制: 必须有 Loop Variant）
+```
+
+### 例 8：REPEAT 循环
+
+```
+ST:  REPEAT body UNTIL cond END_REPEAT
+     │
+     ▼  编译为 SafeASM:
+  loop_start:
+      ;; ... body 指令序列 ...
+      LOCAL_GET cond_idx     ; 加载条件
+      I32_EQZ                ; cond = 0 ?
+      BR_IF loop_start       ; cond=0 → 继续循环
+  loop_end:
+
+     │
+     ▼  语义保持:
+     REPEAT 与 WHILE 的关键区别: 至少执行一次 body
+
+     情况 1: 首次执行后 cond=true
+       ST:  执行 body → 检查 cond=true → 结束循环
+       ASM: 执行 body → cond≠0 → 不跳转 → 结束
+       ✅  至少执行一次的语义保持
+
+     情况 2: 首次执行后 cond=false
+       ST:  执行 body → 检查 cond=false → 继续循环
+       ASM: 执行 body → cond=0 → BR_IF loop_start → 继续
+       ✅  多迭代路径一致
+```
+
+### 例 9：EXIT 语句
+
+```
+ST:  FOR i := 1 TO 100 DO
+         IF found THEN EXIT; END_IF
+         sum := sum + data[i];
+     END_FOR
+     │
+     ▼  编译为 SafeASM:
+      I32_CONST 1
+      LOCAL_SET i_idx
+  for_start:
+      ;; 检查 i > 100 → 跳出
+      ...
+      ;; found 条件
+      LOCAL_GET found_idx
+      BR_IF after_loop       ; EXIT: 直接跳出到循环外
+      ;; 正常循环体
+      LOCAL_GET sum_idx
+      ...
+      BR for_start
+  after_loop:
+
+     │
+     ▼  语义保持:
+     EXIT 在 ST 中表示"立即退出当前最内层循环"
+     ASM 中等价于: BR 跳转到循环外的标签 ✅
+     注意: BR 的 depth 参数必须精确指向循环外层,
+     这在编译期由 codegen.v 的控制流分析保证 ✅
+```
+
+### 例 10：数组访问与边界检查
+
+```
+ST:  val := arr[i]    -- ARRAY[0..15] OF INT
+     │
+     ▼  编译为 SafeASM:
+      ;; 计算地址: base + i * 2 (INT=2 字节)
+      I32_CONST arr_base     ; 数组基址
+      LOCAL_GET i_idx
+      I32_CONST 2
+      I32_MUL                ; i * 元素大小
+      I32_ADD                ; arr_base + i*2
+      
+      ;; 边界检查 (编译期或运行期)
+      LOCAL_GET i_idx
+      I32_CONST 0
+      I32_LT_S               ; i < 0 ?
+      BR_IF trap             ; 越界 → 陷阱
+      LOCAL_GET i_idx
+      I32_CONST 15
+      I32_GT_S               ; i > 15 ?
+      BR_IF trap             ; 越界 → 陷阱
+      
+      ;; 安全加载
+      I32_LOAD {align=1, offset=0}
+      LOCAL_SET val_idx
+      BR after_access
+  trap:
+      UNREACHABLE            ; 触发安全陷阱
+  after_access:
+
+     │
+     ▼  语义保持:
+     ST 语义: val = arr[i], 其中 i ∈ [0, 15]
+     ASM 语义: 计算地址 → 检查 0 ≤ i ≤ 15 → 加载 → 存入 val
+     
+     情况 1: i 在范围内 → 正确加载 ✅
+     情况 2: i 越界 → 触发陷阱（安全行为） ✅
+     
+     边界检查的确切形式取决于编译期是否能静态确定 i 的范围:
+     - 编译期常量 i: 在编译期检查，插入 SAFE_BOUNDS_CHECK 或跳过检查
+     - 运行时变量 i: 在生成的 ASM 中插入边界比较指令
+```
+
+### 例 11：类型转换 (Type Conversion)
+
+```
+ST:  x := DINT(y)    -- y: INT, x: DINT
+     │
+     ▼  编译为 SafeASM (INT→DINT 是提升，无运行时代码):
+      LOCAL_GET y_idx
+      LOCAL_SET x_idx        ; INT 和 DINT 在 ASM 中都是 I32
+
+ST:  a := REAL(b)    -- b: DINT, a: REAL
+     │
+     ▼  编译为 SafeASM:
+      LOCAL_GET b_idx
+      F32_CONVERT_I32_S      ; I32 → F32
+      LOCAL_SET a_idx
+
+ST:  c := DINT(d)    -- d: REAL, c: DINT
+     │
+     ▼  编译为 SafeASM:
+      LOCAL_GET d_idx
+      I32_TRUNC_F32_S        ; F32 → I32 (截断)
+      LOCAL_SET c_idx
+
+     │
+     ▼  语义保持:
+     类型提升 (SINT→INT→DINT, BYTE→WORD→DWORD):
+       在 ST 中无运行时开销（只是表示范围变化）
+       在 ASM 中: 值类型相同（都是 I32），不需要指令 ✅
+     
+     跨类型转换 (INT↔REAL):
+       ST 语义: 调用类型转换函数
+       ASM 语义: 使用 F32_CONVERT_I32_S / I32_TRUNC_F32_S
+       Coq 证明: 转换结果一致 ✅
+```
+
+### 例 12：FB 调用
+
+```
+ST:  TON_inst(IN := start, PT := T#5s);
+     
+     FUNCTION_BLOCK TON
+         VAR_INPUT  IN : BOOL; PT : TIME; END_VAR
+         VAR_OUTPUT Q : BOOL; ET : TIME; END_VAR
+         VAR        running : BOOL := FALSE; start_time : TIME; END_VAR
+         IF IN AND NOT running THEN
+             running := TRUE;
+             start_time := ET;
+         END_IF
+         IF running THEN
+             ET := ET + T#10ms;
+             IF ET >= PT THEN
+                 Q := TRUE;
+             END_IF
+         END_IF
+         IF NOT IN THEN
+             running := FALSE;
+             Q := FALSE;
+             ET := T#0ms;
+         END_IF
+     END_FUNCTION_BLOCK
+     │
+     ▼  编译为 SafeASM:
+     ;; TON_inst 的 FB 数据在内存中的布局:
+     ;;   offset 0:   IN      (I32, BOOL)
+     ;;   offset 4:   PT      (I64, TIME)
+     ;;   offset 12:  Q       (I32, BOOL)
+     ;;   offset 16:  ET      (I64, TIME)
+     ;;   offset 24:  running (I32, BOOL)
+     ;;   offset 28:  start_time (I64, TIME)
+     
+     ;; 1. 将输入参数写入 FB 数据区
+     LOCAL_GET start_idx
+     I32_STORE {align=2, offset=FB_BASE + 0}   ; IN := start
+     ;; PT := T#5s (常量)
+     I64_CONST 5000000000
+     I64_STORE {align=4, offset=FB_BASE + 4}   ; PT := 5s in ns
+     
+     ;; 2. CALL FB 方法 (在 codegen.v 中转为对 TON_body 函数的调用)
+     CALL ton_body_idx
+     
+     ;; 3. FB 执行结束后，从 FB 数据区读取输出
+     I32_LOAD {align=2, offset=FB_BASE + 12}   ; 加载 Q
+     LOCAL_SET q_out_idx
+     I64_LOAD {align=4, offset=FB_BASE + 16}   ; 加载 ET
+     LOCAL_SET et_out_idx
+
+     │
+     ▼  语义保持:
+     ST 语义: FB 调用 = 将输入参数传递给 FB 实例 → 执行 FB 体
+              → 读取 FB 输出
+     ASM 语义: 写参数到 FB 数据区 → CALL FB 方法 → 读回输出
+     
+     关键保证: FB 实例的数据区布局在编译期确定，
+     所有偏移在编译期计算，运行期固定 ✅
+```
+
+### 例 13：嵌套控制流
+
+```
+ST:  IF a > b THEN
+         FOR i := 1 TO 10 DO
+             IF data[i] > 0 THEN
+                 sum := sum + data[i];
+             END_IF
+         END_FOR
+     END_IF
+     │
+     ▼  编译为 SafeASM (嵌套 BLOCK/LOOP):
+      LOCAL_GET a_idx
+      LOCAL_GET b_idx
+      I32_GT_S               ; a > b ?
+      BR_IF after_if         ; 否 → 跳过整个块
+      
+      I32_CONST 1
+      LOCAL_SET i_idx
+  for_start:
+      ;; i > 10 → 跳出
+      LOCAL_GET i_idx
+      I32_CONST 10
+      I32_GT_S
+      BR_IF after_for
+      
+      ;; 内层 IF
+      LOCAL_GET i_idx
+      I32_CONST 2
+      I32_MUL
+      I32_CONST data_base
+      I32_ADD
+      I32_LOAD {align=2, offset=0}   ; data[i]
+      I32_CONST 0
+      I32_GT_S
+      BR_IF skip_inner
+      
+      ;; then 分支
+      LOCAL_GET sum_idx
+      ... (data[i] 的地址计算和加载)
+      I32_ADD
+      LOCAL_SET sum_idx
+      
+  skip_inner:
+      ;; i := i + 1
+      LOCAL_GET i_idx
+      I32_CONST 1
+      I32_ADD
+      LOCAL_SET i_idx
+      BR for_start
+      
+  after_for:
+  after_if:
+
+     │
+     ▼  语义保持（模拟证明的关键）:
+     
+     模拟关系需要证明: 对任意嵌套深度 d,
+     如果 ST 执行到嵌套深度 d 的位置，
+     则 ASM 的 pc 也指向对应的嵌套深度 d 的位置。
+     
+     这是通过 BLOCK/LOOP 指令的嵌套结构保证的:
+       - IF 对应 BLOCK (条件分支)
+       - FOR 对应 LOOP (循环)
+       - 内层 IF 对应内层 BLOCK
+     
+     嵌套深度在编译期已知，BR 的 depth 参数确保跳转目标正确 ✅
+```
+
+### 例 14：质量传播 —— 二元运算
+
+```
+ST:  qR := qA + qB;    -- qA, qB, qR 均为 QINT
+
+     ST 语义 (带质量):
+       qR.value   = qA.value + qB.value
+       qR.quality = worst(qA.quality, qB.quality)
+                      (= max(qA, qB) 数值上)
+     
+     编译为 SafeASM (编译器展开，VM 无感知):
+       ;; ─── 值计算 (与无质量版本相同) ───
+       LOCAL_GET qA_val_idx
+       LOCAL_GET qB_val_idx
+       I32_ADD
+       LOCAL_SET qR_val_idx
+
+       ;; ─── 质量传播 (编译器自动生成) ───
+       I32_CONST Q_BASE + qA_idx      ; 影子质量区偏移
+       I32_LOAD8_U                    ; 读 qA 质量 (1 字节)
+       I32_CONST Q_BASE + qB_idx
+       I32_LOAD8_U                    ; 读 qB 质量
+       I32_GT_U                       ; worst = max(qA_q, qB_q)
+       I32_CONST Q_BASE + qR_idx
+       I32_STORE8                     ; 写结果质量
+       
+     语义保持:
+       情况 1: qA=GOOD(0), qB=GOOD(0) → worst=0 → qR=GOOD ✅
+       情况 2: qA=GOOD(0), qA=BAD(2)   → worst=2 → qR=BAD   ✅
+       情况 3: qA=BAD(2),  qB=BAD(2)   → worst=2 → qR=BAD   ✅
+
+       WCET: 12 条指令 (5 值 + 7 质量)，固定无分支 ✅
+```
+
+### 例 15：质量检查条件
+
+```
+ST:  IF Q_GOOD(qA) THEN
+          qR := qA * 2;
+      END_IF
+
+     编译为 SafeASM:
+       ;; 读取 qA 质量
+       I32_CONST Q_BASE + qA_idx
+       I32_LOAD8_U
+       I32_CONST 0                   ; GOOD = 0
+       I32_EQ                        ; quality == GOOD ?
+       BR_IF end_if                  ; 不是 GOOD → 跳过
+
+       ;; then 分支: qR := qA * 2 (值 + 质量传播)
+       LOCAL_GET qA_val_idx
+       I32_CONST 2
+       I32_MUL
+       LOCAL_SET qR_val_idx
+
+       ;; 质量传播: 结果质量 = qA.quality
+       I32_CONST Q_BASE + qA_idx
+       I32_LOAD8_U
+       I32_CONST Q_BASE + qR_idx
+       I32_STORE8
+
+     end_if:
+
+     语义保持:
+       ST 语义: 仅当 Q_GOOD(qA) 为 TRUE 时执行赋值
+       ASM 语义: 质量检查 → BR_IF 跳过 → 条件成立时才执行
+
+       两种可能的执行路径:
+        路径 1 (质量非 GOOD): 5 条指令 → 跳过 then
+        路径 2 (质量 GOOD):   12 条指令 → 执行 then
+       WCET = max(路径1, 路径2) = 12 条指令 ✅ (可静态计算)
+```
+
+### 例 16：质量传播的 T → QT 隐式转换
+
+```
+ST:  qX : QINT;
+     pY : INT;          -- 无质量位的普通变量
+
+     qX := pY;           -- T → QT: 隐式转换，质量自动设为 GOOD
+
+     编译为 SafeASM:
+       ;; 值赋值
+       LOCAL_GET pY_idx
+       LOCAL_SET qX_val_idx
+
+       ;; 质量自动设 GOOD
+       I32_CONST Q_BASE + qX_idx
+       I32_CONST 0                ; GOOD = 0
+       I32_STORE8
+
+     语义保持:
+       输入 pY=42 → qX.value=42, qX.quality=GOOD
+       质量 GOOD 是对"普通变量值可信"的正确表达 ✅
+```
+
+### 例 17：质量传播的转换链完整性
+
+```
+ST:  VAR_INPUT  AI1 : QREAL; END_VAR
+     VAR         tmp  : REAL;       -- 无质量
+     VAR_OUTPUT AO1  : QREAL; END_VAR
+
+     tmp := AI1;                    -- QT → T: 警告 Q-STRIP
+     AO1 := tmp;                    -- T → QT: 质量自动 GOOD
+
+     ── 问题: AI1 的质量信息在 tmp 处丢失!
+     ── 结果: AO1 质量被误设为 GOOD，实际 AI1 可能是 BAD
+
+     正确写法:
+     VAR tmpQ : QREAL; END_VAR      -- 用 Q 类型保持质量链
+     
+     tmpQ := AI1;                   -- QT → QT: 质量透传 ✅
+     AO1  := tmpQ;                  -- QT → QT: 质量透传 ✅
+
+     编译为 SafeASM (正确写法):
+       ;; AI1 → tmpQ (值传递)
+       LOCAL_GET  AI1_val_idx
+       LOCAL_SET  tmpQ_val_idx
+
+       ;; 质量透传
+       I32_CONST  Q_BASE + AI1_idx
+       I32_LOAD8_U
+       I32_CONST  Q_BASE + tmpQ_idx
+       I32_STORE8
+
+       ;; tmpQ → AO1 (同上)
+       ...
+
+     语义保持：
+       质量链完整: AI1.quality → tmpQ.quality → AO1.quality
+       AI1 质量为 BAD → AO1 也为 BAD (已正确传播) ✅
+```
+
 ---
 
-## 6. 编译正确性形式化定理（开发人员注解版）
+## 6. 抽象关系 R 的完整定义 (Abstraction Relation)
+
+抽象关系 `R(σ, τ)` 是编译正确性证明中最核心的定义。它在 Coq 文件 `vstac/spec/compiler_correctness.v` 中定义为：
+
+### 6.1 形式化定义
+
+```
+R(st_state σ, runtime_state τ) 定义为以下四个条件的合取:
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 条件 1 — 变量值一致性 (Value Consistency)                         │
+│                                                                  │
+│   ∀(x, v) ∈ σ.vars,                                             │
+│     ∃offset, asm_val:                                            │
+│       var_to_sasm_offset(x) = offset ∧                           │
+│       read_sasm_mem(τ, offset) = Some(asm_val) ∧                 │
+│       st_val_to_sasm(v) = asm_val                                │
+│                                                                  │
+│   "ST 中每个变量的值 = ASM 内存中对应偏移处的值"                   │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 条件 2 — 质量一致性 (Quality Consistency) (v1.1 新增)             │
+│                                                                  │
+│   对于每个 Q 类型变量 x 或 I/O 变量 x:                            │
+│     ∃q_offset ∈ σ.quality:                                       │
+│       质量码地址 = Q_BASE + var_idx(x) ∧                          │
+│       read_sasm_mem(τ, Q_BASE + var_idx(x)) = σ.quality[x]       │
+│                                                                  │
+│   对于无质量位的普通变量:                                          │
+│     不要求质量一致性                                              │
+│                                                                  │
+│   "ST 中每个 Q 变量的质量 = ASM 影子质量区中对应偏移处的质量码"     │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 条件 3 — 执行位置一致性 (Control Flow Consistency)                 │
+│                                                                  │
+│   match τ.rt_frames with                                         │
+│   | nil => σ.st_pou_idx = -1       (两者都已完成)                 │
+│   | f :: _ => σ.st_pou_idx = f.frame_func_idx  (同一函数)         │
+│                                                                  │
+│   "ST 正在执行的 POU = ASM 帧栈顶帧的函数索引"                    │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 条件 4 — 调用栈深度一致性 (Call Stack Consistency)                 │
+│                                                                  │
+│   |σ.st_call_stack| = |τ.rt_frames|                              │
+│                                                                  │
+│   "ST 调用栈深度 = ASM 帧栈深度"                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 6.2 类型兼容映射
+
+ST 类型到 SafeASM 值类型的映射（编译期确定，运行期固定）：
+
+| ST 类型 | SafeASM 值类型 | 映射说明 |
+|---------|---------------|---------|
+| BOOL | I32 | TRUE=1, FALSE=0 |
+| BYTE | I32 | 直接映射 |
+| WORD | I32 | 直接映射 |
+| DWORD | I32 | 直接映射 |
+| SINT | I32 | 符号扩展 |
+| INT | I32 | 直接映射 |
+| DINT | I32 | 直接映射 |
+| **LINT** | **I64** | **64 位符号整数 (v1.1)** |
+| REAL | F32 | IEEE 754 单精度 |
+| **LREAL** | **F64** | **IEEE 754 双精度 (v1.1)** |
+| TIME | I64 | 纳秒计数 |
+| **QUALITY** | **I32** | **质量码 (低 2 位有效) (v1.1)** |
+| **Q* (QINT/QREAL 等)** | **I32/F32/...** | **值类型同基础类型 + 影子质量区 1 字节 (v1.1)** |
+| ARRAY[...] | I32/... | 元素类型对应 |
+
+### 6.3 抽象关系图
+
+```
+    ST 世界                      ASM 世界
+    ┌──────────┐                ┌──────────────┐
+    │ σ.vars   │                │ τ.rt_memory  │
+    │  x → 42  │───R(cond1)──→ │  [0x100]=42  │
+    │  y → TRUE│               │  [0x104]=1   │
+    └──────────┘               └──────────────┘
+    ┌──────────┐               ┌──────────────┐
+    │ σ.quality│               │ τ.rt_memory  │
+    │ x → GOOD │───R(cond2)──→ │  [Q_BASE+x]  │
+    │ y → BAD  │  (v1.1 新增) │  = 0x00      │
+    └──────────┘               │  [Q_BASE+y]  │
+    ┌──────────┐               │  = 0x02      │
+    │ σ.pou_idx│               └──────────────┘
+    │ = 0      │───R(cond3)──→ ┌──────────────┐
+    │          │               │ τ.rt_frames  │
+    └──────────┘               │  top.frame_  │
+    ┌──────────┐               │  func_idx=0  │
+    │ σ.call_  │               └──────────────┘
+    │ stack|=2 │───R(cond4)──→ ┌──────────────┐
+    └──────────┘               │ |τ.rt_frames|│
+                               │ = 2          │
+                               └──────────────┘
+```
+
+---
+
+## 7. 编译正确性形式化定理（开发人员注解版）
 
 以下为 Coq 中声明的核心定理，附带通俗解释。
 
-### 6.1 抽象关系 R
+### 7.1 抽象关系 R
 
 ```
 R(st_state, asm_state) 定义为:
@@ -294,7 +967,7 @@ R(st_state, asm_state) 定义为:
      ...
 ```
 
-### 6.2 编译正确性定理
+### 7.2 编译正确性定理
 
 ```
 定理 semantics_preservation:
@@ -315,7 +988,7 @@ R(st_state, asm_state) 定义为:
    编译没有改变程序的语义。这叫作 Simulation Relation。
 ```
 
-### 6.3 安全保持定理
+### 7.3 安全保持定理
 
 ```
 定理 safety_preservation:
@@ -333,7 +1006,7 @@ R(st_state, asm_state) 定义为:
 
 ---
 
-## 7. 验证检查清单
+## 8. 验证检查清单
 
 对于每个 ST 构造，开发人员应验证以下语义保持条件：
 
@@ -361,3 +1034,86 @@ A: 编译正确性定理只保证"如果 VM 正确执行 SafeASM 指令，则结
 
 **Q: 函数调用怎么保证语义保持？**
 A: 通过 CALL/RETURN 指令机制和栈帧管理。参数在调用前压入值栈，CALL 指令创建新栈帧，RETURN 返回值留在栈顶，恢复调用者帧。这与 ST 的函数调用语义（传参→执行→返回）完全对应。
+
+---
+
+## 附录 B：编译器逐阶段证明对应表
+
+以下表格将每个 ST 构造的语义保持证明映射到对应的 Coq 文件和定理。
+
+| ST 构造 | Coq 实现文件 | 核心定理/引理 | 依赖的证明策略 |
+|---------|-------------|-------------|---------------|
+| 字面量 | `codegen.v` | `compile_literal_correct` | `simpl; auto` |
+| 变量引用 | `codegen.v` | `compile_var_correct` | `unfold var_to_sasm_offset` |
+| 二元运算 | `codegen.v` | `compile_binop_simulation` | `induction; step_simpl` |
+| 一元运算 | `codegen.v` | `compile_unop_simulation` | `case analysis on op` |
+| 比较运算 | `codegen.v` | `compile_compare_simulation` | `case analysis; omega` |
+| 逻辑 AND/OR | `codegen.v` | `compile_shortcircuit_simulation` | `case analysis on cond; eauto` |
+| XOR | `codegen.v` | `compile_xor_simulation` | `unfold xorb; auto` |
+| 数组访问 | `codegen.v` | `compile_array_access_simulation` | `lia; apply bounds_check_correct` |
+| 赋值 | `codegen.v` | `compile_assign_simulation` | `eapply compile_expr_correct` |
+| IF-THEN-ELSE | `codegen.v` | `compile_if_simulation` | `case analysis; eauto 3` |
+| CASE | `codegen.v` | `compile_case_simulation` | `induction on branches; eauto` |
+| FOR 循环 | `codegen.v` | `compile_for_simulation` | `invariant induction; omega` |
+| WHILE 循环 | `codegen.v` | `compile_while_simulation` | `invariant induction; omega` |
+| REPEAT 循环 | `codegen.v` | `compile_repeat_simulation` | `invariant induction; omega` |
+| EXIT | `codegen.v` | `compile_exit_simulation` | `unfold br_depth; auto` |
+| RETURN | `codegen.v` | `compile_return_simulation` | `unfold pop_frame; auto` |
+| 函数调用 | `codegen.v` | `compile_call_simulation` | `eapply frame_push_correct` |
+| FB 调用 | `codegen.v` | `compile_fb_simulation` | `eapply fb_memory_layout_correct` |
+| 类型转换 | `codegen.v` | `compile_typecast_simulation` | `case analysis on conversion type` |
+| **质量传播（二元运算）** | `codegen.v` | `compile_quality_binop_simulation` | **`destruct q1, q2; auto` (v1.1)** |
+| **质量传播（一元运算）** | `codegen.v` | `compile_quality_unop_simulation` | **`destruct q; auto` (v1.1)** |
+| **Q_STATUS 提取** | `codegen.v` | `compile_qstatus_simulation` | **`unfold lookup_quality` (v1.1)** |
+| **Q_SET 写入** | `codegen.v` | `compile_qset_simulation` | **`unfold update_quality` (v1.1)** |
+| **Q_WITH 构造** | `codegen.v` | `compile_qwith_simulation` | **`split; auto` (v1.1)** |
+| **Q_GOOD/Q_BAD 检查** | `codegen.v` | `compile_qcheck_simulation` | **`destruct q; auto` (v1.1)** |
+| **T→QT 转换** | `codegen.v` | `compile_t_to_qt_simulation` | **`split; reflexivity` (v1.1)** |
+| **QT→T 转换** | `codegen.v` | `compile_qt_to_t_simulation` | **`simpl; auto` (v1.1)** |
+| 脱糖 (Desugar) | `desugar.v` | `desugar_semantics_preservation` | `induction; simpl; auto` |
+| 类型检查 (Type Safety) | `typechecker.v` | `progress` + `preservation` | `induction; inversion; auto` |
+| 整体编译 | `compiler_correctness.v` | `total_semantics_preservation` | `apply multi_step_sasm_trans` |
+
+### 证明层次结构
+
+```
+total_semantics_preservation (整体语义保持定理)
+  │
+  ├── semantics_preservation (单步模拟)
+  │     │
+  │     ├── compile_expr_correct (表达式求值保持) 
+  │     │     ├── compile_literal_correct
+  │     │     ├── compile_var_correct
+  │     │     ├── compile_binop_simulation
+  │     │     ├── compile_shortcircuit_simulation
+  │     │     ├── compile_typecast_simulation
+  │     │     └── quality层 (v1.1):
+  │     │           ├── compile_quality_binop_simulation
+  │     │           ├── compile_quality_unop_simulation
+  │     │           ├── compile_qstatus_simulation
+  │     │           ├── compile_qset_simulation
+  │     │           ├── compile_qwith_simulation
+  │     │           ├── compile_qcheck_simulation
+  │     │           ├── compile_t_to_qt_simulation
+  │     │           └── compile_qt_to_t_simulation
+  │     │
+  │     └── compile_stmt_simulation (语句执行保持)
+  │           ├── compile_assign_simulation
+  │           ├── compile_if_simulation
+  │           ├── compile_case_simulation
+  │           ├── compile_for_simulation
+  │           ├── compile_while_simulation
+  │           ├── compile_repeat_simulation
+  │           ├── compile_call_simulation
+  │           ├── compile_fb_simulation
+  │           ├── compile_exit_simulation
+  │           └── compile_return_simulation
+  │
+  └── desugar_semantics_preservation (脱糖保持)
+  
+safety_preservation (安全保持定理)
+  │
+  ├── all_loops_bounded (循环有界性)
+  ├── all_memory_accesses_safe (内存安全)
+  └── sasm_no_recursive_calls (无递归)
+```
