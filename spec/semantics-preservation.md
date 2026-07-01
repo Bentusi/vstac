@@ -514,18 +514,18 @@ ST:  val := arr[i]    -- ARRAY[0..15] OF INT
       LOCAL_GET i_idx
       I32_CONST 0
       I32_LT_S               ; i < 0 ?
-      BR_IF trap             ; 越界 → 陷阱
+      BR_IF trap             ; 越界 → 保护动作
       LOCAL_GET i_idx
       I32_CONST 15
       I32_GT_S               ; i > 15 ?
-      BR_IF trap             ; 越界 → 陷阱
+      BR_IF trap             ; 越界 → 保护动作
       
       ;; 安全加载
       I32_LOAD {align=1, offset=0}
       LOCAL_SET val_idx
       BR after_access
   trap:
-      UNREACHABLE            ; 触发安全陷阱
+      UNREACHABLE            ; 触发安全保护动作
   after_access:
 
      │
@@ -534,7 +534,7 @@ ST:  val := arr[i]    -- ARRAY[0..15] OF INT
      ASM 语义: 计算地址 → 检查 0 ≤ i ≤ 15 → 加载 → 存入 val
      
      情况 1: i 在范围内 → 正确加载 ✅
-     情况 2: i 越界 → 触发陷阱（安全行为） ✅
+     情况 2: i 越界 → 触发保护动作（安全行为） ✅
      
      边界检查的确切形式取决于编译期是否能静态确定 i 的范围:
      - 编译期常量 i: 在编译期检查，插入 SAFE_BOUNDS_CHECK 或跳过检查

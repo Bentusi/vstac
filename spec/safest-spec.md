@@ -1268,4 +1268,318 @@ PROGRAM SafeArrayAccess
         avg := 0;
     END_IF
 END_PROGRAM
+
+
+---
+
+## 附录 B：不支持的用法与替代方案
+
+本章面向从标准 IEC 61131-3 ST 或 CoDeSys ST 迁移到 SafeST 的开发者，列出常见的不支持用法及其推荐的替代方案。
+
+### B.1 指针与引用
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| `REF_TO INT`、`POINTER TO INT` | 指针/引用违反 P2 原则（无法静态验证别名安全性） | 直接使用变量名；若需间接索引，用数组 + 索引变量 |
+| `ADR(x)` 取地址 | 无指针则无地址概念 | 不需要 |
+| `^` 间接引用 | 无指针则无间接引用 | 不需要 |
+
+**典型迁移场景**：
+
+```iecst
+(* 标准 ST: 指针传递参数 *)
+FUNCTION Scale : REAL
+    VAR_INPUT
+        pValue : POINTER TO REAL;
+    END_VAR
+    Scale := pValue^ * 1.5;
+END_FUNCTION
+
+(* SafeST: 直接传值 *)
+FUNCTION Scale : REAL
+    VAR_INPUT
+        Value : REAL;
+    END_VAR
+    Scale := Value * 1.5;
+END_FUNCTION
+```
+
+### B.2 字符串操作
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| `STRING`、`WSTRING` 类型声明 | 字符串涉及动态内存（变长），违反 P2 | 安全级逻辑无需字符串；人机交互字符串由上层的 HMI 系统管理 |
+| `CONCAT`、`LEFT`、`MID` 等字符串函数 | 同上 | 不需要 |
+| `STRING_TO_*` 类型转换 | 同上 | 不需要 |
+| 字符串字面量赋值给变量 | 同上 | 编译期报错 |
+
+### B.3 动态内存与运行时构造
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| `__NEW`、`__DELETE` | 动态内存分配违反 P2 | 所有变量在 VAR 块中静态声明 |
+| `ARRAY[*]` 可变长度数组 | 边界无法在编译期确定 | 使用固定大小数组 `ARRAY[0..MAX]`，运行时只使用前 N 个元素 |
+| `FLEXIBLE ARRAY` | 同上 | 同上 |
+| 运行时创建 FB 实例 | 违反静态实例化原则 S5 | 在 VAR 块中预先声明所有 FB 实例 |
+
+**典型迁移场景**：
+
+```iecst
+(* 标准 ST: 可变长度数组 *)
+FUNCTION SumArray : DINT
+    VAR_INPUT
+        Data : ARRAY[*] OF DINT;
+        Len  : DINT;
+    END_VAR
+    VAR
+        i : DINT;
+    END_VAR
+    SumArray := 0;
+    FOR i := 0 TO Len - 1 DO
+        SumArray := SumArray + Data[i];
+    END_FOR
+END_FUNCTION
+
+(* SafeST: 固定大小数组 *)
+FUNCTION SumArray : DINT
+    VAR_INPUT
+        Data : ARRAY[0..255] OF DINT;
+        Len  : DINT;  (* 运行时只使用前 Len 个元素 *)
+    END_VAR
+    VAR
+        i : DINT;
+    END_VAR
+    SumArray := 0;
+    FOR i := 0 TO Len - 1 DO
+        SumArray := SumArray + Data[i];
+    END_FOR
+END_FUNCTION
+```
+
+### B.4 面向对象特性
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| `METHOD`、`PROPERTY` | OOP 特性，安全级编程不需要 | 用 `FUNCTION_BLOCK` + `VAR_INPUT`/`VAR_OUTPUT` 实现封装 |
+| `CLASS`、`INTERFACE` | 同上 | 用 FB 替代类，用函数接口替代接口继承 |
+| `EXTENDS`、`IMPLEMENTS` | 继承/实现增加形式化证明复杂度 | 用 FB 组合（一个 FB 包含另一个 FB 实例）替代继承 |
+| `THIS`、`SUPER` | 自引用 | 不需要 |
+| 多态调用 | 违反 P3（运行时类型识别不可证明） | 用 CASE 语句实现分派 |
+
+**典型迁移场景**：
+
+```iecst
+(* 标准 ST: 继承 + 方法重写 *)
+CLASS Motor
+    METHOD Start : BOOL
+    ...
+END_CLASS
+
+CLASS Pump EXTENDS Motor
+    METHOD Start : BOOL  (* 重写 *)
+    ...
+END_CLASS
+
+(* SafeST: FB 组合替代继承 *)
+FUNCTION_BLOCK Motor
+    VAR_INPUT
+        Enable : BOOL;
+    END_VAR
+    VAR_OUTPUT
+        Running : BOOL;
+    END_VAR
+    ...
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK Pump
+    VAR
+        MotorInst : Motor;  (* 组合 FB *)
+    END_VAR
+    ...
+END_FUNCTION_BLOCK
+```
+
+### B.5 顺序功能图 (SFC)
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| `STEP`、`TRANSITION`、`ACTION` | SFC 语义复杂，WCET 难以确定 | 用 CASE + IF 实现状态机 |
+| 并行分支/同步 | 同上 | 用多个 BOOL 变量 + 组合逻辑实现 |
+| 步进动作限定符 (N/S/R/L/D 等) | 同上 | 用 IF/赋值实现 |
+
+**典型迁移场景**：
+
+```iecst
+(* IEC 61131-3 SFC:
+   Step1 ──┐
+           ├→ Step3 (并行)
+   Step2 ──┘
+*)
+
+(* SafeST: CASE 状态机替代 *)
+FUNCTION_BLOCK StateMachine
+    VAR_INPUT
+        Cond1 : BOOL;
+        Cond2 : BOOL;
+    END_VAR
+    VAR_OUTPUT
+        State : INT := 0;
+    END_VAR
+    
+    CASE State OF
+        0:  (* 初始状态，等待 Cond1 *)
+            IF Cond1 THEN State := 1; END_IF
+        1:  (* Step1 等效 *)
+            State := 2;
+        2:  (* Step2 等效——两个分支汇合 *)
+            IF Cond2 THEN State := 0; END_IF
+    END_CASE
+END_FUNCTION_BLOCK
+```
+
+### B.6 直接地址访问与硬件依赖
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| `%IW3.1`、`%QW2.0`、`%IX0.0` 等 | 直接硬件地址访问违反 P1（非安全级直接操作） | 在 SafeASM 的 IOMap Section 中声明映射，ST 代码中使用符号变量名 |
+| `AT` 地址分配 | 同上 | 编译器通过 IOMap 自动分配地址 |
+
+```iecst
+(* 标准 ST: 直接地址访问 *)
+PROGRAM HWAccess
+    Input AT %IW3.1 : INT;     (* 直接绑定硬件地址 *)
+    Output AT %QW2.0 : INT;
+END_PROGRAM
+
+(* SafeST: 符号变量名，地址在 IOMap Section 中声明 *)
+PROGRAM HWAccess
+    VAR_INPUT
+        AnalogInput : INT;     (* 编译器从 IOMap 获取地址映射 *)
+    END_VAR
+    VAR_OUTPUT
+        AnalogOutput : INT;
+    END_VAR
+    AnalogOutput := AnalogInput * 2;
+END_PROGRAM
+```
+
+### B.7 函数与运算符重载
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| 同一函数名不同参数类型重载 | 违反 P2（编译期名称解析复杂化） | 使用不同函数名：`ScaleINT`、`ScaleREAL` |
+| 运算符重载 | 同上 | 不支持 |
+
+### B.8 多任务与异步特性
+
+| 不支持的用法 | 说明 | 推荐替代方案 |
+|------------|------|-------------|
+| 多任务 (多个 TASK) | 安全级系统用单任务周期扫描模型 | 单任务周期扫描 |
+| 中断服务程序 | 违反 WCET 确定性 | 统一在扫描周期中处理 |
+| 看门狗指令 | 由 VM 层统一管理周期计数器 | 不需要 |
+| 异步事件处理 | 不确定性，违反 P1 | 用轮询 + 标志位实现 |
+
+### B.9 不安全的 ST 惯用法
+
+本节列出在语法上可行但从安全角度被 SafeST 禁止的编程习惯。
+
+| 惯用法 | 问题 | SafeST 行为 |
+|--------|------|-------------|
+| 除数字面量 `x := 100 / 0;` | 编译期可确定的除零 | ❌ 编译期报错 |
+| 数组索引越界 `a[999]` (a 声明为 `[0..15]`) | 部分编译器容忍 | ❌ 编译期报错（若索引可静态确定）或插入运行时 BOUNDS_CHECK |
+| EXIT 在循环体外 | 非结构化控制流 | ❌ 编译期报错 |
+| RETURN 在 FUNCTION 中带返回值但后续还有代码 | 不可达代码 | ⚠️ 警告，编译器忽略不可达代码 |
+| FOR 循环中修改循环变量 | 导致不确定的循环次数 | ❌ 编译期报错（禁止在 FOR 循环体内修改循环变量） |
+| 变量未初始化直接使用 | 未定义行为 | ❌ 编译期报错（SafeST 要求所有变量有默认初始化值） |
+| FB 输出变量在外部直接赋值 | 破坏封装性 | ❌ 编译期报错 |
+| QUALITY 变量直接赋值数值（如 `q := 2;`） | 掩盖质量语义 | ⚠️ 警告，建议使用 `Q_SET()` 或质量常量 GOOD/BAD |
+| `x := x + 1;` 在 FUNCTION 中修改全局变量 | S4 函数无副作用原则 | ❌ 编译期报错 |
+
+---
+
+## 附录 C：与其他 ST 规范的对比
+
+### C.1 IEC 61131-3 完整标准
+
+IEC 61131-3 完整标准（第三版，2013）定义了约 **200+** 个功能块、**60+** 条语句和 **200+** 个标准函数。SafeST 是 IEC 61131-3 的**真子集**，剪裁约 **70%** 的语言特性。
+
+| 维度 | IEC 61131-3 完整 ST | SafeST |
+|------|---------------------|--------|
+| 数据类型 | 全部（含用户自定义） | 13 种基础类型 + 9 种 Q 类型（无符号类型排除） |
+| 语言大小 | ~250 个关键字/内置函数 | ~60 个关键字 + 15 个质量操作内置函数 |
+| 数组 | 静态 + 动态 + 可变长度 | 仅静态，最多 3 维 |
+| 面向对象 | 完整（CLASS/METHOD/INTERFACE/继承/多态） | ❌ 完全排除 |
+| SFC | 完整（STEP/TRANSITION/ACTION/并行分支/同步） | ❌ 完全排除 |
+| 指针/引用 | REF/REF_TO/POINTER/ADR/^ | ❌ 完全排除 |
+| 字符串 | STRING/WSTRING + 完整操作函数 | ❌ 完全排除 |
+| 多任务 | TASK + 优先级 + 触发条件 | ❌ 单任务周期扫描 |
+| 异常 | TRY/CATCH/__QUERY_EXCEPTION | ❌ 完全排除 |
+| 文件 I/O | 支持文件操作 | ❌ 完全排除 |
+| 通信 | 内置通信 FBs | ❌ 由上层系统处理 |
+| 形式化证明 | 无 | ✅ Coq 全量形式化验证 |
+| 质量位语义 | 无 | ✅ Q* 类型体系 + 影子内存传播 |
+
+### C.2 PLCopen 安全子集
+
+PLCopen Safety 规范定义了一个 IEC 61131-3 的安全关键子集，主要用于安全 PLC 认证。SafeST 与之相比：
+
+| 特性 | PLCopen Safety | SafeST | 差异分析 |
+|------|---------------|--------|---------|
+| 目标认证等级 | SIL 3 (IEC 62061 / EN 13849) | SIL 3/4 | 等效 |
+| 语言剪裁策略 | 基于经验的安全编程规则 | 基于形式化验证的语义分析 | SafeST 更严格（Coq 证明可追溯性更强） |
+| 静态分析工具 | ⚠️ 依赖认证厂商实现 | ✅ 编译器内置，Coq 已证明 | SafeST 的静态分析可追溯至证明 |
+| 限制的指令集 | 约 50 条安全相关指令 | 约 30 个语句 + 15 个质量函数 | SafeST 子集更小 |
+| FBD/LD 支持 | ✅ FBD + LD + SFC + ST | ✅ 仅 ST | SafeST 聚焦纯文本语言 |
+| 数据类型限制 | ✅ 类似 SafeST | ✅ 类似 PLCopen | 基本一致（均有 BOOL/INT/REAL/TIME） |
+| 指针限制 | ⚠️ 部分允许 | ❌ 完全禁止 | SafeST 更严格 |
+| 递归 | ❌ 禁止 | ❌ 禁止 | 一致 |
+| 循环限制 | ⚠️ 需要运行时监控 | ✅ 编译期推导上限 | SafeST 更严格（编译期证明） |
+| 形式化验证 | ❌ 无 | ✅ Coq 全量 | **关键差异** |
+| 质量位语义 | ❌ 无 | ✅ Q* 类型体系 | **SafeST 独有** |
+
+### C.3 CoDeSys ST 扩展
+
+CoDeSys (3S-Smart Software Solutions) 是 IEC 61131-3 ST 最流行的商业实现之一。它在标准基础上做了大量扩展，SafeST 明确排除这些扩展。
+
+| CoDeSys 扩展 | 说明 | SafeST 支持 | 替代方案 |
+|-------------|------|------------|---------|
+| `__VAR` 持久变量 | 掉电保持 | ✅ `RETAIN` 关键字 | 等效 |
+| `__XWORD` `__UXINT` | 平台相关类型 | ❌ | 使用 `DINT`/`LINT` |
+| `__ISVALID``__ISOPEN` | I/O 诊断 | ❌ | 用 `Q_GOOD()` 替代 |
+| `case else` 带 `__` | 扩展断言行 | ❌ | 标准 `CASE` |
+| 内联 C 代码 | `__codedescriptor` 等 | ❌ | 禁止 |
+| `__QUERYCOUNTER` | 性能计数器 | ❌ | 由 VM 层 WCET 模块提供 |
+| 枚举类型 | 自定义枚举 | ❌ | 用 `INT` + `CONSTANT` |
+| `UNION` | 联合体 | ❌ | 展开为独立变量 |
+
+### C.4 Siemens S7-SCL
+
+Siemens S7-SCL (Structured Control Language) 是西门子 PLC 的 ST 方言，广泛用于 SIMATIC 产品线。
+
+| 特性 | S7-SCL | SafeST | 差异 |
+|------|--------|--------|------|
+| 编程模型 | 组织块 (OB) + 功能 (FC/DB/FB) | PROGRAM + FUNCTION + FUNCTION_BLOCK | 概念类似，命名不同 |
+| 数据类型 | S7 特有类型 (DATE_AND_TIME、S5TIME、CHAR 等) | 13 种标准类型 + Q* | SafeST 更简洁 |
+| 块调用 | `UC` `CC` `CALL` 三种语法 | 统一函数调用语法 | SafeST 更一致 |
+| 全局访问 | `DB` + 绝对偏移/DBSymbol | `VAR_GLOBAL` | SafeST 更高层抽象 |
+| 间接寻址 | `P#` 指针 + `ARRAY` 索引 | 仅 `ARRAY` 索引 | SafeST 更严格 |
+| 中断处理 | OB40-OB47 (硬件中断) | ❌ | SafeST 单任务周期 |
+| 性能监控 | 运行时间 + 周期时间统计 | 编译期 WCET 推导 | SafeST 静态化 |
+| 诊断功能 | `GET_DP_DIAG` 等系统函数 | `Q_STATUS()` 质量码 | 等效但语义不同 |
+
+### C.5 对比总结
+
+| ST 方言/规范 | 安全认证 | 形式化验证 | 质量位 | 子集大小 | 适用场景 |
+|-------------|---------|-----------|--------|---------|---------|
+| IEC 61131-3 完整 ST | 不保证 | ❌ | ❌ | ~250 | 通用 PLC |
+| PLCopen Safety | SIL 3 | ❌ | ❌ | ~50 | 安全 PLC |
+| CoDeSys ST | 不保证 | ❌ | ❌ | ~300+ | 商业控制器 |
+| Siemens S7-SCL | SIL 2/3 | ❌ | ❌ | ~150 | SIMATIC 安全 |
+| **SafeST** | **SIL 3/4** | **✅ Coq 全量** | **✅ Q* 体系** | **~30 语句 + 15 函数** | **形式化验证安全级仪控** |
+
+**关键结论**：SafeST 的独特优势不在于其 ST 语言特性多少，而在于：
+1. 每个保留的特性都可以在 Coq 中进行精确的形式化语义建模
+2. 编译器正确性（ST 语义 → SafeASM 语义）已通过 Coq 证明
+3. 独创的 Q* 质量类型体系填补了 IEC 61131-3 在信号质量语义上的空白
+4. 与 WASM 借鉴关系不同，SafeST 是独立设计的面向安全仪控的最小完备语言，而非从某通用语言剪裁
 ```
